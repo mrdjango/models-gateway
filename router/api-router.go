@@ -233,6 +233,21 @@ func SetApiRouter(router *gin.Engine) {
 		}
 		registerChannelRoutes(apiRouter)
 		registerAuthzRoutes(apiRouter)
+		tensorGridRoute := apiRouter.Group("/internal/tensorgrid/v1")
+		tensorGridRoute.Use(middleware.TensorGridServiceAuth(), middleware.DisableCache())
+		{
+			tensorGridRoute.POST("/tokens/revoke-by-secret", controller.RevokeTensorGridTokenBySecretGlobal)
+			tensorGridRoute.POST("/catalog/sync", controller.SyncTensorGridCatalog)
+			tensorGridRoute.PUT("/users/:subject", controller.UpsertTensorGridUser)
+			tensorGridRoute.GET("/users/:subject/credit", controller.GetTensorGridCredit)
+			tensorGridRoute.POST("/users/:subject/credit/adjustments", controller.AdjustTensorGridCredit)
+			tensorGridRoute.GET("/users/:subject/tokens", controller.ListTensorGridTokens)
+			tensorGridRoute.POST("/users/:subject/tokens", controller.CreateTensorGridToken)
+			tensorGridRoute.POST("/users/:subject/tokens/revoke-by-secret", controller.RevokeTensorGridTokenBySecret)
+			tensorGridRoute.POST("/users/:subject/tokens/:token_id/reveal", controller.RevealTensorGridToken)
+			tensorGridRoute.DELETE("/users/:subject/tokens/:token_id", controller.RevokeTensorGridToken)
+			tensorGridRoute.GET("/users/:subject/usage", controller.TensorGridUsage)
+		}
 		tokenRoute := apiRouter.Group("/token")
 		tokenRoute.Use(middleware.UserAuth())
 		{
