@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
@@ -48,7 +49,7 @@ func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycom
 
 // SettleBilling 执行计费结算。如果 RelayInfo 上有 BillingSession 则通过 session 结算，
 // 否则回退到旧的 PostConsumeQuota 路径（兼容按次计费等场景）。
-func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuota int) error {
+func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuota int, consumeParams ...model.RecordConsumeLogParams) error {
 	if relayInfo.Billing != nil {
 		preConsumed := relayInfo.Billing.GetPreConsumedQuota()
 		delta := actualQuota - preConsumed
@@ -71,8 +72,18 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 			))
 		}
 
-		if err := relayInfo.Billing.Settle(actualQuota); err != nil {
-			return err
+		var params model.RecordConsumeLogParams
+		if len(consumeParams) > 0 {
+			params = consumeParams[0]
+		}
+		var settleErr error
+		if session, ok := relayInfo.Billing.(*BillingSession); ok {
+			settleErr = session.settle(actualQuota, params)
+		} else {
+			settleErr = relayInfo.Billing.Settle(actualQuota)
+		}
+		if settleErr != nil {
+			return settleErr
 		}
 
 		// 发送额度通知（订阅计费使用订阅剩余额度）

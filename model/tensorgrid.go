@@ -30,6 +30,7 @@ type TensorGridAccount struct {
 	Subject         string    `json:"subject" gorm:"type:varchar(36);not null;uniqueIndex"`
 	UserId          int       `json:"user_id" gorm:"not null;uniqueIndex"`
 	SyncVersion     int64     `json:"sync_version" gorm:"not null;default:1"`
+	CreditSequence  int64     `json:"credit_sequence" gorm:"not null;default:0"`
 	Currency        string    `json:"currency" gorm:"type:varchar(3);not null"`
 	FxRateIrtPerUSD string    `json:"fx_rate_irt_per_usd" gorm:"type:varchar(64);not null;default:'0'"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -37,6 +38,65 @@ type TensorGridAccount struct {
 }
 
 func (TensorGridAccount) TableName() string { return "tensorgrid_accounts" }
+
+// TensorGridCreditOutbox is the durable hand-off between Gateway settlement and
+// TensorGrid's user-facing credit projection. It intentionally stores the
+// authoritative balance after the mutation so a snapshot can repair a missed
+// delivery without replaying a debit.
+type TensorGridCreditOutbox struct {
+	Id              int64      `json:"id" gorm:"primaryKey"`
+	EventId         string     `json:"event_id" gorm:"type:varchar(128);not null;uniqueIndex"`
+	Kind            string     `json:"kind" gorm:"type:varchar(16);not null;index"`
+	Subject         string     `json:"subject" gorm:"type:varchar(36);not null;index"`
+	AccountId       int64      `json:"account_id" gorm:"not null;index"`
+	RequestId       string     `json:"request_id" gorm:"type:varchar(128);not null;default:'';index"`
+	Sequence        int64      `json:"sequence" gorm:"not null;index"`
+	Currency        string     `json:"currency" gorm:"type:varchar(3);not null"`
+	DeltaMinor      int64      `json:"delta_minor" gorm:"not null;default:0"`
+	DeltaMicroUSD   int64      `json:"delta_microusd" gorm:"not null;default:0"`
+	BalanceMinor    int64      `json:"balance_minor" gorm:"not null;default:0"`
+	BalanceMicroUSD int64      `json:"balance_microusd" gorm:"not null;default:0"`
+	UsageBreakdown  string     `json:"usage_breakdown" gorm:"type:text;not null;default:'{}'"`
+	PricingVersion  string     `json:"pricing_version" gorm:"type:varchar(128);not null;default:''"`
+	OccurredAt      time.Time  `json:"occurred_at"`
+	Attempts        int        `json:"attempts" gorm:"not null;default:0"`
+	NextAttemptAt   time.Time  `json:"next_attempt_at" gorm:"index"`
+	LastError       string     `json:"last_error" gorm:"type:text;not null;default:''"`
+	DeliveredAt     *time.Time `json:"delivered_at" gorm:"index"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+func (TensorGridCreditOutbox) TableName() string { return "tensorgrid_credit_outboxes" }
+
+const (
+	TensorGridSettlementReserved = "reserved"
+	TensorGridSettlementSettled  = "settled"
+	TensorGridSettlementRefunded = "refunded"
+)
+
+// TensorGridBillingSettlement is the durable wallet reservation for a single
+// Gateway request. The final wallet delta and credit outbox row are committed
+// in one database transaction, so a process crash cannot leave a settled
+// charge without a corresponding TensorGrid event.
+type TensorGridBillingSettlement struct {
+	Id                int64      `json:"id" gorm:"primaryKey"`
+	AccountId         int64      `json:"account_id" gorm:"not null;index;uniqueIndex:tensorgrid_settlement_account_request"`
+	RequestId         string     `json:"request_id" gorm:"type:varchar(128);not null;uniqueIndex:tensorgrid_settlement_account_request"`
+	ReservedQuota     int        `json:"reserved_quota" gorm:"not null;default:0"`
+	ActualQuota       int        `json:"actual_quota" gorm:"not null;default:0"`
+	BalanceQuotaAfter int        `json:"balance_quota_after" gorm:"not null;default:0"`
+	Status            string     `json:"status" gorm:"type:varchar(16);not null;index"`
+	ReservedAt        time.Time  `json:"reserved_at"`
+	SettledAt         *time.Time `json:"settled_at"`
+	RefundedAt        *time.Time `json:"refunded_at"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+func (TensorGridBillingSettlement) TableName() string {
+	return "tensorgrid_billing_settlements"
+}
 
 type TensorGridBalanceMutation struct {
 	Id                    int64     `json:"id" gorm:"primaryKey"`
@@ -596,6 +656,18 @@ func AdjustTensorGridBalance(
 			BalanceQuotaAfter: balanceAfter, Reason: reason,
 		}
 		if err := tx.Create(&mutation).Error; err != nil {
+			return err
+		}
+		usageJSON, err := tensorGridUsageJSON(map[string]interface{}{
+			"reason": reason, "source": "tensorgrid_adjustment",
+		})
+		if err != nil {
+			return err
+		}
+		if err := enqueueTensorGridCreditEventTx(
+			tx, account, balanceAfter, "adjust:"+idempotencyKey,
+			appliedAmountMinor, appliedAmountMicroUSD, usageJSON, "",
+		); err != nil {
 			return err
 		}
 		created = true

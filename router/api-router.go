@@ -237,7 +237,7 @@ func SetApiRouter(router *gin.Engine) {
 		tensorGridRoute.Use(middleware.TensorGridServiceAuth(), middleware.DisableCache())
 		{
 			tensorGridRoute.POST("/tokens/revoke-by-secret", controller.RevokeTensorGridTokenBySecretGlobal)
-			tensorGridRoute.POST("/catalog/sync", controller.SyncTensorGridCatalog)
+			tensorGridRoute.GET("/catalog", controller.TensorGridCatalog)
 			tensorGridRoute.PUT("/users/:subject", controller.UpsertTensorGridUser)
 			tensorGridRoute.GET("/users/:subject/credit", controller.GetTensorGridCredit)
 			tensorGridRoute.POST("/users/:subject/credit/adjustments", controller.AdjustTensorGridCredit)

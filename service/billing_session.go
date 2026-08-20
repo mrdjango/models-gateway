@@ -40,20 +40,37 @@ type BillingSession struct {
 // 资金来源和令牌额度分两步提交：若资金来源已提交但令牌调整失败，
 // 会标记 fundingSettled 防止 Refund 对已提交的资金来源执行退款。
 func (s *BillingSession) Settle(actualQuota int) error {
+	return s.settle(actualQuota, model.RecordConsumeLogParams{})
+}
+
+func (s *BillingSession) settle(actualQuota int, consumeParams model.RecordConsumeLogParams) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.settled {
 		return nil
 	}
 	delta := actualQuota - s.preConsumedQuota
-	if delta == 0 {
+	wallet, tensorGridWallet := s.funding.(*WalletFunding)
+	if delta == 0 && (!tensorGridWallet || !wallet.tensorGrid) {
 		s.settled = true
 		return nil
 	}
 	// 1) 调整资金来源（仅在尚未提交时执行，防止重复调用）
 	if !s.fundingSettled {
-		if err := s.funding.Settle(delta); err != nil {
-			return err
+		if tensorGridWallet && wallet.tensorGrid {
+			handled, err := model.SettleTensorGridWalletQuota(
+				s.relayInfo.UserId, wallet.requestId, actualQuota, consumeParams,
+			)
+			if err != nil {
+				return err
+			}
+			if !handled {
+				return errors.New("TensorGrid wallet account disappeared during settlement")
+			}
+		} else {
+			if err := s.funding.Settle(delta); err != nil {
+				return err
+			}
 		}
 		s.fundingSettled = true
 	}
@@ -243,6 +260,23 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 func (s *BillingSession) reserveFunding(delta int) error {
 	switch funding := s.funding.(type) {
 	case *WalletFunding:
+		if funding.tensorGrid {
+			targetQuota := funding.consumed + delta
+			handled, reserved, err := model.ReserveTensorGridWalletQuota(
+				funding.userId, funding.requestId, targetQuota,
+			)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+			}
+			if !handled {
+				return types.NewError(errors.New("TensorGrid wallet account disappeared during reservation"), types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+			}
+			if !reserved {
+				return types.NewError(ErrInsufficientWalletQuota, types.ErrorCodeInsufficientUserQuota, types.ErrOptionWithSkipRetry())
+			}
+			funding.consumed = targetQuota
+			return nil
+		}
 		// 与结算补扣（SettleBilling 正差额 → WalletFunding.Settle）语义一致：
 		// 全额无条件扣减，余额不足的部分记为欠费（余额可为负），不中断请求，
 		// 保证日志记录的预扣额度与用户余额的实际变动始终对账一致。
@@ -363,7 +397,7 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 
 	// 钱包路径需要先检查用户额度
 	tryWallet := func() (*BillingSession, *types.NewAPIError) {
-		userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+		userQuota, err := model.GetUserQuota(relayInfo.UserId, true)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
 		}
@@ -383,7 +417,9 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 
 		session := &BillingSession{
 			relayInfo: relayInfo,
-			funding:   &WalletFunding{userId: relayInfo.UserId},
+			funding: &WalletFunding{
+				userId: relayInfo.UserId, requestId: relayInfo.RequestId,
+			},
 		}
 		if apiErr := session.preConsume(c, preConsumedQuota); apiErr != nil {
 			return nil, apiErr

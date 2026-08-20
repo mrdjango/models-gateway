@@ -341,12 +341,8 @@ type RecordConsumeLogParams struct {
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
-	if !common.LogConsumeEnabled {
-		return
-	}
-	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
-	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
+	username := c.GetString("username")
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	otherStr := common.MapToJsonStr(EnrichTensorGridLogOther(userId, params.Other))
@@ -383,9 +379,21 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
 	}
-	err := createLog(log)
-	if err != nil {
-		logger.LogError(c, "failed to record log: "+err.Error())
+	// Allocate the durable request id before either the user log or billing
+	// outbox is written. Reconciliation can then replay the same event after a
+	// crash without creating a second charge.
+	ensureLogRequestId(log)
+	if common.LogConsumeEnabled {
+		logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
+		if err := createLog(log); err != nil {
+			logger.LogError(c, "failed to record log: "+err.Error())
+		}
+	}
+	if err := TensorGridCreditEventFromConsume(userId, log.RequestId, params); err != nil {
+		logger.LogError(c, "failed to enqueue TensorGrid credit event: "+err.Error())
+	}
+	if !common.LogConsumeEnabled {
+		return
 	}
 	if common.DataExportEnabled {
 		LogQuotaData(QuotaDataLogParams{

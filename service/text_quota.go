@@ -47,7 +47,9 @@ type textQuotaSummary struct {
 	CacheCreationTokens5m  int
 	CacheCreationTokens1h  int
 	ImageTokens            int
+	ImageOutputTokens      int
 	AudioTokens            int
+	AudioOutputTokens      int
 	ModelName              string
 	TokenName              string
 	UseTimeSeconds         int64
@@ -262,7 +264,9 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	summary.CacheCreationTokens5m = usage.ClaudeCacheCreation5mTokens
 	summary.CacheCreationTokens1h = usage.ClaudeCacheCreation1hTokens
 	summary.ImageTokens = usage.PromptTokensDetails.ImageTokens
+	summary.ImageOutputTokens = usage.CompletionTokenDetails.ImageTokens
 	summary.AudioTokens = usage.PromptTokensDetails.AudioTokens
+	summary.AudioOutputTokens = usage.CompletionTokenDetails.AudioTokens
 	legacyClaudeDerived := isLegacyClaudeDerivedOpenAIUsage(relayInfo, usage)
 	isOpenRouterClaudeBilling := relayInfo.ChannelMeta != nil &&
 		relayInfo.ChannelType == constant.ChannelTypeOpenRouter &&
@@ -448,10 +452,6 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
 
-	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
-		logger.LogError(ctx, "error settling billing: "+err.Error())
-	}
-
 	logModel := summary.ModelName
 	if strings.HasPrefix(logModel, "gpt-4-gizmo") {
 		logModel = "gpt-4-gizmo-*"
@@ -484,12 +484,20 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		other["image"] = true
 		other["image_ratio"] = summary.ImageRatio
 		other["image_output"] = summary.ImageTokens
+		other["image_input_tokens"] = summary.ImageTokens
+	}
+	if summary.ImageOutputTokens != 0 {
+		other["image_output_tokens"] = summary.ImageOutputTokens
 	}
 	appendToolSurchargeLogInfo(other, summary.ToolSurchargeItems)
 	if summary.AudioInputPrice > 0 && summary.AudioTokens > 0 {
 		other["audio_input_seperate_price"] = true
 		other["audio_input_token_count"] = summary.AudioTokens
+		other["audio_input_tokens"] = summary.AudioTokens
 		other["audio_input_price"] = summary.AudioInputPrice
+	}
+	if summary.AudioOutputTokens != 0 {
+		other["audio_output_tokens"] = summary.AudioOutputTokens
 	}
 	if summary.CacheCreationTokens > 0 {
 		other["cache_creation_tokens"] = summary.CacheCreationTokens
@@ -523,7 +531,7 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 
-	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
+	consumeParams := model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     summary.PromptTokens,
 		CompletionTokens: summary.CompletionTokens,
@@ -536,7 +544,11 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		IsStream:         relayInfo.IsStream,
 		Group:            relayInfo.UsingGroup,
 		Other:            other,
-	})
+	}
+	if err := SettleBilling(ctx, relayInfo, summary.Quota, consumeParams); err != nil {
+		logger.LogError(ctx, "error settling billing: "+err.Error())
+	}
+	model.RecordConsumeLog(ctx, relayInfo.UserId, consumeParams)
 	gopool.Go(func() {
 		perfmetrics.RecordRelaySample(relayInfo, true, int64(summary.CompletionTokens))
 	})

@@ -72,6 +72,9 @@ func UpsertTensorGridUser(c *gin.Context) {
 		tensorGridError(c, err)
 		return
 	}
+	if err := model.EnqueueTensorGridBalanceSnapshot(account.Subject); err != nil {
+		common.SysLog("failed to enqueue TensorGrid account snapshot: " + err.Error())
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": account})
 }
 

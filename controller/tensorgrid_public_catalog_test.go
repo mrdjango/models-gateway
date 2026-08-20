@@ -1,0 +1,86 @@
+package controller
+
+import (
+	"testing"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestTensorGridPublicCatalogSanitizesPricingAndProviderData(t *testing.T) {
+	previousQuotaPerUnit := common.QuotaPerUnit
+	common.QuotaPerUnit = 500_000
+	t.Cleanup(func() { common.QuotaPerUnit = previousQuotaPerUnit })
+	cacheRead := 0.1
+	cacheWrite := 0.2
+	row := model.Pricing{
+		ModelName:        "public:gpt-5.5",
+		QuotaType:        0,
+		ModelRatio:       2,
+		CompletionRatio:  3,
+		CacheRatio:       &cacheRead,
+		CreateCacheRatio: &cacheWrite,
+		SupportedEndpointTypes: []constant.EndpointType{
+			constant.EndpointTypeOpenAI,
+			constant.EndpointTypeOpenAIResponse,
+		},
+		BillingExpr: `tier("base", p * 2 + c * 6)`,
+	}
+
+	public := tensorGridPublicModel(row)
+	require.Equal(t, "public:gpt-5.5", public["id"])
+	assert.Equal(t, "language", public["category"])
+	assert.Equal(t, []string{"chat.completions", "responses"}, public["endpoints"])
+	assert.Equal(t, true, public["capabilities"].(gin.H)["text"])
+	assert.NotContains(t, public, "provider")
+	assert.NotContains(t, public, "base_url")
+	assert.NotContains(t, public, "key")
+	assert.NotContains(t, public, "model_ratio")
+	assert.NotContains(t, public, "billing_expr")
+
+	pricing, ok := public["pricing"].(gin.H)
+	require.True(t, ok)
+	assert.Equal(t, int64(4_000_000), pricing["input_per_million_microusd"])
+	assert.Equal(t, int64(12_000_000), pricing["output_per_million_microusd"])
+	assert.Equal(t, int64(400_000), pricing["cache_read_per_million_microusd"])
+	assert.Equal(t, int64(800_000), pricing["cache_write_per_million_microusd"])
+}
+
+func TestTensorGridPublicCatalogEvaluatesTieredRetailRatesWithoutExposingExpression(t *testing.T) {
+	row := model.Pricing{
+		ModelName: "tiered:model", QuotaType: 1, ModelPrice: 99, BillingMode: "tiered_expr",
+		BillingExpr: `tier("base", p * 2.5 + c * 10 + cr * 0.25 + cc * 3.125 + cc1h * 5 + img * 4 + img_o * 12 + ai * 8 + ao * 16)`,
+	}
+
+	public := tensorGridPublicModel(row)
+	assert.NotContains(t, public, "billing_expr")
+	pricing := public["pricing"].(gin.H)
+	assert.Equal(t, int64(2_500_000), pricing["input_per_million_microusd"])
+	assert.Equal(t, int64(10_000_000), pricing["output_per_million_microusd"])
+	assert.Equal(t, int64(250_000), pricing["cache_read_per_million_microusd"])
+	assert.Equal(t, int64(3_125_000), pricing["cache_write_per_million_microusd"])
+	meters := pricing["extra_meters"].(gin.H)
+	assert.Equal(t, int64(5_000_000), meters["cache_write_1h"])
+	assert.Equal(t, int64(4_000_000), meters["image_input"])
+	assert.Equal(t, int64(12_000_000), meters["image_output"])
+	assert.Equal(t, int64(8_000_000), meters["audio_input"])
+	assert.Equal(t, int64(16_000_000), meters["audio_output"])
+}
+
+func TestTensorGridPublicCatalogUsesRequestMeterForFixedPricing(t *testing.T) {
+	public := tensorGridPublicModel(model.Pricing{
+		ModelName:              "image:model",
+		QuotaType:              1,
+		ModelPrice:             0.04,
+		SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeImageGeneration},
+	})
+
+	assert.Equal(t, "image", public["category"])
+	pricing := public["pricing"].(gin.H)
+	assert.Equal(t, int64(40_000), pricing["extra_meters"].(gin.H)["request"])
+	assert.Equal(t, int64(0), pricing["input_per_million_microusd"])
+}

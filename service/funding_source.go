@@ -33,17 +33,31 @@ type FundingSource interface {
 var ErrInsufficientWalletQuota = errors.New("wallet quota insufficient")
 
 type WalletFunding struct {
-	userId   int
-	consumed int // 实际预扣的用户额度
+	userId     int
+	requestId  string
+	consumed   int // 实际预扣的用户额度
+	tensorGrid bool
 }
 
 func (w *WalletFunding) Source() string { return BillingSourceWallet }
 
 func (w *WalletFunding) PreConsume(amount int) error {
+	handled, reserved, err := model.ReserveTensorGridWalletQuota(w.userId, w.requestId, amount)
+	if err != nil {
+		return err
+	}
+	if handled {
+		w.tensorGrid = true
+		if !reserved {
+			return ErrInsufficientWalletQuota
+		}
+		w.consumed = amount
+		return nil
+	}
 	if amount <= 0 {
 		return nil
 	}
-	reserved, err := model.TryReserveUserQuota(w.userId, amount)
+	reserved, err = model.TryReserveUserQuota(w.userId, amount)
 	if err != nil {
 		return err
 	}
@@ -65,6 +79,16 @@ func (w *WalletFunding) Settle(delta int) error {
 }
 
 func (w *WalletFunding) Refund() error {
+	if w.tensorGrid {
+		handled, err := model.RefundTensorGridWalletQuota(w.userId, w.requestId)
+		if err != nil {
+			return err
+		}
+		if !handled {
+			return errors.New("TensorGrid wallet account disappeared during refund")
+		}
+		return nil
+	}
 	if w.consumed <= 0 {
 		return nil
 	}

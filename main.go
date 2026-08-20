@@ -150,6 +150,7 @@ func main() {
 	// switch are enforced inside the runner and each handler's Enabled().
 	controller.RegisterScheduledSystemTasks()
 	service.StartSystemTaskRunner()
+	service.StartTensorGridCreditSync()
 
 	if os.Getenv("BATCH_UPDATE_ENABLED") == "true" {
 		common.BatchUpdateEnabled = true
@@ -293,6 +294,9 @@ func InitResources() error {
 
 	// 加载环境变量
 	common.InitEnv()
+	if err := service.ValidateTensorGridCreditSyncConfig(); err != nil {
+		return err
+	}
 
 	logger.SetupLogger()
 
