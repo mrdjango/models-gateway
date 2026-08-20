@@ -3,6 +3,7 @@ package service
 import (
 	"math"
 	"math/rand"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/QuantumNous/new-api/model"
@@ -512,6 +513,96 @@ func TestBillingSessionReserveWalletTopUpDecrementsBalance(t *testing.T) {
 	userQuota, err := model.GetUserQuota(userID, false)
 	require.NoError(t, err)
 	assert.Equal(t, 450_000, userQuota)
+}
+
+func TestRealtimeUsageExtendsBillingReservationInsteadOfChargingTwice(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	billing := &recordingBillingSettler{preConsumedQuota: 100}
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-4o-realtime-preview",
+		UsingGroup:      "default",
+		Billing:         billing,
+	}
+	usage := &dto.RealtimeUsage{}
+	usage.InputTokenDetails.TextTokens = 100
+	usage.InputTokens = 100
+	usage.TotalTokens = 100
+
+	require.NoError(t, PreWssConsumeQuota(c, relayInfo, usage))
+	require.Len(t, billing.reserveTargets, 1)
+	firstTarget := billing.reserveTargets[0]
+	assert.Greater(t, firstTarget, 100)
+
+	require.NoError(t, PreWssConsumeQuota(c, relayInfo, usage))
+	require.Len(t, billing.reserveTargets, 2)
+	assert.Equal(t, firstTarget+(firstTarget-100), billing.reserveTargets[1])
+	assert.Equal(t, billing.reserveTargets[1], billing.preConsumedQuota)
+}
+
+func TestBillingSessionDoesNotMutateUnlimitedTokenQuota(t *testing.T) {
+	truncate(t)
+	gin.SetMode(gin.TestMode)
+
+	const userID, tokenID = 703, 703
+	seedUser(t, userID, 1_000)
+	seedToken(t, tokenID, userID, "unlimited-token", 0)
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.TensorGridAccount{}, &model.TensorGridBillingSettlement{},
+		&model.TensorGridBillingAdjustment{}, &model.TensorGridCreditOutbox{},
+	))
+	t.Setenv("TENSORGRID_INTEGRATION_SECRET", "tensorgrid-service-test-secret-at-least-32-bytes")
+	require.NoError(t, model.DB.Create(&model.TensorGridAccount{
+		Subject: "9ee9c09e-14ea-45e8-ac2a-f15f65034d34", UserId: userID,
+		Currency: model.TensorGridCurrencyUSD, FxRateIrtPerUSD: "1",
+	}).Error)
+	require.NoError(t, model.DB.Model(&model.Token{}).Where("id = ?", tokenID).
+		Update("unlimited_quota", true).Error)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	relayInfo := &relaycommon.RelayInfo{
+		RequestId: "tensorgrid-unlimited-token-request",
+		UserId:    userID, TokenId: tokenID, TokenKey: "unlimited-token",
+		TokenUnlimited: true, ForcePreConsume: true,
+		UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
+	}
+
+	require.Nil(t, PreConsumeBilling(c, 100, relayInfo))
+	assert.True(t, relayInfo.Billing.NeedsRefund())
+	require.NoError(t, relayInfo.Billing.Settle(150))
+
+	token, err := model.GetTokenById(tokenID)
+	require.NoError(t, err)
+	assert.Zero(t, token.RemainQuota)
+	assert.Zero(t, token.UsedQuota)
+	userQuota, err := model.GetUserQuota(userID, false)
+	require.NoError(t, err)
+	assert.Equal(t, 850, userQuota)
+}
+
+func TestNativeUnlimitedTokenAccountingRemainsUnchanged(t *testing.T) {
+	truncate(t)
+	gin.SetMode(gin.TestMode)
+
+	const userID, tokenID = 704, 704
+	seedUser(t, userID, 1_000)
+	seedToken(t, tokenID, userID, "native-unlimited-token", 0)
+	require.NoError(t, model.DB.Model(&model.Token{}).Where("id = ?", tokenID).
+		Update("unlimited_quota", true).Error)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	relayInfo := &relaycommon.RelayInfo{
+		RequestId: "native-unlimited-token-request",
+		UserId:    userID, TokenId: tokenID, TokenKey: "native-unlimited-token",
+		TokenUnlimited: true, ForcePreConsume: true,
+		UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
+	}
+
+	require.Nil(t, PreConsumeBilling(c, 100, relayInfo))
+	require.NoError(t, relayInfo.Billing.Settle(150))
+
+	token, err := model.GetTokenById(tokenID)
+	require.NoError(t, err)
+	assert.Equal(t, -150, token.RemainQuota)
+	assert.Equal(t, 150, token.UsedQuota)
 }
 
 func TestTryTieredSettleUsesFinalGroupAfterRetry(t *testing.T) {

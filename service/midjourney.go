@@ -72,7 +72,12 @@ func SettleMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.M
 		return false, errors.New("Midjourney task must be persisted before billing")
 	}
 
-	result, billingErr := postConsumeQuotaWithResult(relayInfo, task.Quota, 0, true)
+	consumeParams := model.RecordConsumeLogParams{
+		ChannelId: task.GetBillingChannelId(), ModelName: CovertMjpActionToModelName(task.Action),
+		Quota: task.Quota, TokenId: relayInfo.TokenId, Group: relayInfo.UsingGroup,
+		Other: GenerateMjOtherInfo(relayInfo, relayInfo.PriceData),
+	}
+	result, billingErr := postConsumeQuotaWithResult(relayInfo, task.Quota, 0, true, consumeParams)
 	if !result.FundingApplied {
 		task.Quota = 0
 		task.TokenId = 0
@@ -100,12 +105,38 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 		return true
 	}
 
-	if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
+	other := map[string]interface{}{
+		"task_id": task.MjId,
+		"reason":  reason,
+	}
+	params := model.RecordConsumeLogParams{
+		ChannelId: task.GetBillingChannelId(), ModelName: CovertMjpActionToModelName(task.Action),
+		Quota: quota, TokenId: task.TokenId, Other: other,
+	}
+	handled, appliedDelta, err := model.AdjustTensorGridWalletQuota(
+		task.UserId, fmt.Sprintf("midjourney:%d:refund", task.Id), -quota, params,
+	)
+	if err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("退还 Midjourney 用户额度失败 task %s: %s", task.MjId, err.Error()))
 		return false
 	}
+	if handled && appliedDelta != -quota {
+		logger.LogWarn(ctx, fmt.Sprintf("Midjourney refund was incomplete for task %s: applied=%d expected=%d", task.MjId, appliedDelta, -quota))
+		return false
+	}
+	if !handled {
+		if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
+			logger.LogWarn(ctx, fmt.Sprintf("退还 Midjourney 用户额度失败 task %s: %s", task.MjId, err.Error()))
+			return false
+		}
+	}
 
-	if task.TokenId > 0 {
+	tensorGridUser, lookupErr := model.IsTensorGridUser(task.UserId)
+	if lookupErr != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("failed to identify TensorGrid ownership for Midjourney task %s: %s", task.MjId, lookupErr.Error()))
+		return false
+	}
+	if task.TokenId > 0 && !tensorGridUser {
 		tokenKey := resolveTokenKey(ctx, task.TokenId, task.MjId)
 		if tokenKey != "" {
 			if err := model.IncreaseTokenQuota(task.TokenId, tokenKey, quota); err != nil {
@@ -125,10 +156,7 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 		ModelName: CovertMjpActionToModelName(task.Action),
 		Quota:     quota,
 		TokenId:   task.TokenId,
-		Other: map[string]interface{}{
-			"task_id": task.MjId,
-			"reason":  reason,
-		},
+		Other:     other,
 	})
 
 	task.Quota = 0

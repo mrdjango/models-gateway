@@ -338,6 +338,7 @@ type RecordConsumeLogParams struct {
 	IsStream         bool                   `json:"is_stream"`
 	Group            string                 `json:"group"`
 	Other            map[string]interface{} `json:"other"`
+	BillingRequestId string                 `json:"-"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -389,7 +390,11 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 			logger.LogError(c, "failed to record log: "+err.Error())
 		}
 	}
-	if err := TensorGridCreditEventFromConsume(userId, log.RequestId, params); err != nil {
+	billingRequestId := log.RequestId
+	if params.BillingRequestId != "" {
+		billingRequestId = params.BillingRequestId
+	}
+	if err := TensorGridCreditEventFromConsume(userId, billingRequestId, params); err != nil {
 		logger.LogError(c, "failed to enqueue TensorGrid credit event: "+err.Error())
 	}
 	if !common.LogConsumeEnabled {

@@ -39,7 +39,7 @@ func setupTensorGridModelTest(t *testing.T) {
 	require.NoError(t, DB.AutoMigrate(
 		&User{}, &Token{}, &Channel{}, &Ability{}, &Option{}, &Log{}, &TensorGridAccount{},
 		&TensorGridBalanceMutation{}, &TensorGridTokenCreation{}, &TensorGridCreditOutbox{},
-		&TensorGridBillingSettlement{},
+		&TensorGridBillingSettlement{}, &TensorGridBillingAdjustment{},
 	))
 
 	t.Cleanup(func() {
@@ -396,6 +396,103 @@ func TestTensorGridWalletSettlementNeverMakesBalanceNegative(t *testing.T) {
 	assert.Equal(t, float64(1_200_000), delivery.UsageBreakdown["billed_quota"])
 	assert.Equal(t, float64(1_000_000), delivery.UsageBreakdown["collected_quota"])
 	assert.Equal(t, float64(200_000), delivery.UsageBreakdown["uncollected_quota"])
+}
+
+func TestTensorGridWalletAdjustmentIsAtomicIdempotentAndNeverNegative(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "ee91ed9f-a78a-4c6a-986b-397b414ebf4f"
+	const chargeRequestID = "task:42:recalculate:0:1200000"
+
+	account, err := UpsertTensorGridAccount(subject, "adjustment@example.com", "Adjustment", "USD", "", true, 1)
+	require.NoError(t, err)
+	_, _, _, _, err = AdjustTensorGridBalance(subject, "seed:adjustment", "USD", 200, 0, "seed", false)
+	require.NoError(t, err)
+
+	handled, applied, err := AdjustTensorGridWalletQuota(
+		account.UserId, chargeRequestID, 1_200_000,
+		RecordConsumeLogParams{ModelName: "task-model", Other: map[string]interface{}{"cache_tokens": 11}},
+	)
+	require.NoError(t, err)
+	assert.True(t, handled)
+	assert.Equal(t, 1_000_000, applied)
+	user, err := GetUserById(account.UserId, true)
+	require.NoError(t, err)
+	assert.Zero(t, user.Quota)
+
+	var chargeOutbox TensorGridCreditOutbox
+	require.NoError(t, DB.Where("request_id = ?", chargeRequestID).First(&chargeOutbox).Error)
+	assert.Equal(t, int64(-2_000_000), chargeOutbox.DeltaMicroUSD)
+	delivery, err := TensorGridCreditDeliveryFromOutbox(&chargeOutbox)
+	require.NoError(t, err)
+	assert.Equal(t, float64(1_200_000), delivery.UsageBreakdown["billed_quota"])
+	assert.Equal(t, float64(1_000_000), delivery.UsageBreakdown["collected_quota"])
+	assert.Equal(t, float64(200_000), delivery.UsageBreakdown["uncollected_quota"])
+	assert.Equal(t, float64(11), delivery.UsageBreakdown["cache_read_tokens"])
+
+	handled, applied, err = AdjustTensorGridWalletQuota(
+		account.UserId, chargeRequestID, 1_200_000, RecordConsumeLogParams{ModelName: "task-model"},
+	)
+	require.NoError(t, err)
+	assert.True(t, handled)
+	assert.Equal(t, 1_000_000, applied)
+	require.NoError(t, TensorGridCreditEventFromConsume(
+		account.UserId, chargeRequestID, RecordConsumeLogParams{ModelName: "task-model", Quota: 1_200_000},
+	))
+	var chargeCount int64
+	require.NoError(t, DB.Model(&TensorGridCreditOutbox{}).Where("request_id = ?", chargeRequestID).Count(&chargeCount).Error)
+	assert.Equal(t, int64(1), chargeCount)
+
+	_, _, err = AdjustTensorGridWalletQuota(
+		account.UserId, chargeRequestID, 1_100_000, RecordConsumeLogParams{},
+	)
+	assert.ErrorIs(t, err, ErrTensorGridIdempotencyConflict)
+
+	const refundRequestID = "task:42:refund"
+	handled, applied, err = AdjustTensorGridWalletQuota(
+		account.UserId, refundRequestID, -250_000, RecordConsumeLogParams{ModelName: "task-model"},
+	)
+	require.NoError(t, err)
+	assert.True(t, handled)
+	assert.Equal(t, -250_000, applied)
+	user, err = GetUserById(account.UserId, true)
+	require.NoError(t, err)
+	assert.Equal(t, 250_000, user.Quota)
+	var refundOutbox TensorGridCreditOutbox
+	require.NoError(t, DB.Where("request_id = ?", refundRequestID).First(&refundOutbox).Error)
+	assert.Equal(t, int64(500_000), refundOutbox.DeltaMicroUSD)
+}
+
+func TestTensorGridWalletAdjustmentRollsBackWhenOutboxInsertFails(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "b68a34a0-034a-4908-afae-d8125307fb24"
+	const requestID = "violation-request:adjustment"
+
+	account, err := UpsertTensorGridAccount(subject, "adjustment-rollback@example.com", "Rollback", "USD", "", true, 1)
+	require.NoError(t, err)
+	_, _, _, _, err = AdjustTensorGridBalance(subject, "seed:adjustment-rollback", "USD", 200, 0, "seed", false)
+	require.NoError(t, err)
+
+	callbackName := "test:fail_tensorgrid_adjustment_outbox_insert"
+	require.NoError(t, DB.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement != nil && tx.Statement.Table == (TensorGridCreditOutbox{}).TableName() {
+			tx.AddError(errors.New("forced TensorGrid adjustment outbox failure"))
+		}
+	}))
+	t.Cleanup(func() {
+		_ = DB.Callback().Create().Remove(callbackName)
+	})
+
+	handled, _, err := AdjustTensorGridWalletQuota(
+		account.UserId, requestID, 250_000, RecordConsumeLogParams{ModelName: "violation-model"},
+	)
+	assert.True(t, handled)
+	assert.ErrorContains(t, err, "forced TensorGrid adjustment outbox failure")
+	user, err := GetUserById(account.UserId, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1_000_000, user.Quota)
+	var adjustmentCount int64
+	require.NoError(t, DB.Model(&TensorGridBillingAdjustment{}).Where("request_id = ?", requestID).Count(&adjustmentCount).Error)
+	assert.Zero(t, adjustmentCount)
 }
 
 func TestTensorGridWalletReservationRefundIsIdempotent(t *testing.T) {

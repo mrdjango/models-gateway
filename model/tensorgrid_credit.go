@@ -131,6 +131,24 @@ func TensorGridCreditEventFromConsume(userID int, requestID string, params Recor
 		if !errors.Is(settlementErr, gorm.ErrRecordNotFound) {
 			return settlementErr
 		}
+		var adjustment TensorGridBillingAdjustment
+		adjustmentErr := DB.Where("account_id = ? AND request_id = ?", account.Id, requestID).
+			First(&adjustment).Error
+		if adjustmentErr == nil {
+			var outboxCount int64
+			if err := DB.Model(&TensorGridCreditOutbox{}).
+				Where("event_id = ?", tensorGridOutboxEventID(account.Subject, requestID)).
+				Count(&outboxCount).Error; err != nil {
+				return err
+			}
+			if outboxCount != 1 {
+				return errors.New("applied TensorGrid billing adjustment is missing its outbox event")
+			}
+			return nil
+		}
+		if !errors.Is(adjustmentErr, gorm.ErrRecordNotFound) {
+			return adjustmentErr
+		}
 	}
 	deltaMinor, deltaMicroUSD, usageJSON, pricingVersion, err := tensorGridCreditEventValues(&account, params)
 	if err != nil {
@@ -326,6 +344,113 @@ func SettleTensorGridWalletQuota(userID int, requestID string, actualQuota int, 
 		}
 	}
 	return handled, err
+}
+
+// AdjustTensorGridWalletQuota atomically applies a wallet change that is not
+// part of the initial request reservation. A positive delta charges quota and
+// a negative delta refunds it. Reusing requestID is idempotent.
+func AdjustTensorGridWalletQuota(userID int, requestID string, requestedQuotaDelta int, params RecordConsumeLogParams) (handled bool, appliedQuotaDelta int, err error) {
+	if !tensorGridIntegrationConfigured() {
+		return false, 0, nil
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" || len(requestID) > 128 {
+		return false, 0, errors.New("TensorGrid billing adjustment requires a request id of at most 128 characters")
+	}
+	if requestedQuotaDelta < -common.MaxQuota || requestedQuotaDelta > common.MaxQuota {
+		return false, 0, errors.New("TensorGrid billing adjustment is outside the supported quota range")
+	}
+
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var account TensorGridAccount
+		accountErr := lockForUpdate(tx).Where("user_id = ?", userID).First(&account).Error
+		if errors.Is(accountErr, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if accountErr != nil {
+			return accountErr
+		}
+		handled = true
+
+		var existing TensorGridBillingAdjustment
+		existingErr := lockForUpdate(tx).
+			Where("account_id = ? AND request_id = ?", account.Id, requestID).
+			First(&existing).Error
+		if existingErr == nil {
+			if existing.RequestedQuotaDelta != requestedQuotaDelta {
+				return ErrTensorGridIdempotencyConflict
+			}
+			appliedQuotaDelta = existing.AppliedQuotaDelta
+			return nil
+		}
+		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
+			return existingErr
+		}
+
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", userID).First(&user).Error; err != nil {
+			return err
+		}
+		appliedQuotaDelta = requestedQuotaDelta
+		if appliedQuotaDelta > user.Quota {
+			appliedQuotaDelta = user.Quota
+		}
+		balanceAfter := int64(user.Quota) - int64(appliedQuotaDelta)
+		if balanceAfter < 0 || balanceAfter > int64(common.MaxQuota) {
+			return errors.New("TensorGrid billing adjustment would move the balance outside the supported range")
+		}
+
+		eventParams := params
+		eventParams.Other = make(map[string]interface{}, len(params.Other)+4)
+		for key, value := range params.Other {
+			eventParams.Other[key] = value
+		}
+		eventParams.Other["requested_quota_delta"] = requestedQuotaDelta
+		magnitude := appliedQuotaDelta
+		if magnitude < 0 {
+			magnitude = -magnitude
+			eventParams.Other["refund_quota"] = magnitude
+		} else {
+			eventParams.Other["billed_quota"] = requestedQuotaDelta
+			eventParams.Other["collected_quota"] = appliedQuotaDelta
+			if uncollectedQuota := requestedQuotaDelta - appliedQuotaDelta; uncollectedQuota > 0 {
+				eventParams.Other["uncollected_quota"] = uncollectedQuota
+			}
+		}
+		eventParams.Quota = magnitude
+		deltaMinor, deltaMicroUSD, usageJSON, pricingVersion, err := tensorGridCreditEventValues(&account, eventParams)
+		if err != nil {
+			return err
+		}
+		if appliedQuotaDelta < 0 {
+			deltaMinor = -deltaMinor
+			deltaMicroUSD = -deltaMicroUSD
+		}
+
+		if appliedQuotaDelta != 0 {
+			if err := tx.Model(&User{}).Where("id = ?", userID).
+				Update("quota", int(balanceAfter)).Error; err != nil {
+				return err
+			}
+		}
+		if err := enqueueTensorGridCreditEventTx(
+			tx, &account, int(balanceAfter), requestID, deltaMinor, deltaMicroUSD,
+			usageJSON, pricingVersion,
+		); err != nil {
+			return err
+		}
+		return tx.Create(&TensorGridBillingAdjustment{
+			AccountId: account.Id, RequestId: requestID,
+			RequestedQuotaDelta: requestedQuotaDelta,
+			AppliedQuotaDelta:   appliedQuotaDelta, BalanceQuotaAfter: int(balanceAfter),
+		}).Error
+	})
+	if err == nil && handled {
+		if cacheErr := invalidateUserCache(userID); cacheErr != nil {
+			common.SysLog("failed to invalidate TensorGrid wallet cache after adjustment: " + cacheErr.Error())
+		}
+	}
+	return handled, appliedQuotaDelta, err
 }
 
 // RefundTensorGridWalletQuota restores a reservation exactly once. Settled

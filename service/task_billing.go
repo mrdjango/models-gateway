@@ -92,14 +92,23 @@ func taskIsSubscription(task *model.Task) bool {
 }
 
 // taskAdjustFunding 调整任务的资金来源（钱包或订阅），delta > 0 表示扣费，delta < 0 表示退还。
-func taskAdjustFunding(task *model.Task, delta int) error {
+func taskAdjustFunding(task *model.Task, delta int, requestID string, params model.RecordConsumeLogParams) (int, error) {
 	if taskIsSubscription(task) {
-		return model.PostConsumeUserSubscriptionDelta(task.PrivateData.SubscriptionId, int64(delta))
+		return delta, model.PostConsumeUserSubscriptionDelta(task.PrivateData.SubscriptionId, int64(delta))
+	}
+	handled, appliedDelta, err := model.AdjustTensorGridWalletQuota(
+		task.UserId, requestID, delta, params,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if handled {
+		return appliedDelta, nil
 	}
 	if delta > 0 {
-		return model.DecreaseUserQuota(task.UserId, delta, false)
+		return delta, model.DecreaseUserQuota(task.UserId, delta, false)
 	}
-	return model.IncreaseUserQuota(task.UserId, -delta, false)
+	return delta, model.IncreaseUserQuota(task.UserId, -delta, false)
 }
 
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。
@@ -108,15 +117,23 @@ func taskAdjustTokenQuota(ctx context.Context, task *model.Task, delta int) {
 	if task.PrivateData.TokenId <= 0 || delta == 0 {
 		return
 	}
-	tokenKey := resolveTokenKey(ctx, task.PrivateData.TokenId, task.TaskID)
-	if tokenKey == "" {
+	tensorGridUser, err := model.IsTensorGridUser(task.UserId)
+	if err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("failed to identify TensorGrid ownership for task %s: %s", task.TaskID, err.Error()))
 		return
 	}
-	var err error
+	if tensorGridUser {
+		return
+	}
+	token, err := model.GetTokenById(task.PrivateData.TokenId)
+	if err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("获取令牌失败 (tokenId=%d, task=%s): %s", task.PrivateData.TokenId, task.TaskID, err.Error()))
+		return
+	}
 	if delta > 0 {
-		err = model.DecreaseTokenQuota(task.PrivateData.TokenId, tokenKey, delta)
+		err = model.DecreaseTokenQuota(task.PrivateData.TokenId, token.Key, delta)
 	} else {
-		err = model.IncreaseTokenQuota(task.PrivateData.TokenId, tokenKey, -delta)
+		err = model.IncreaseTokenQuota(task.PrivateData.TokenId, token.Key, -delta)
 	}
 	if err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("调整令牌额度失败 (delta=%d, task=%s): %s", delta, task.TaskID, err.Error()))
@@ -174,9 +191,25 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 		return true
 	}
 
-	// 1. 退还资金来源（钱包或订阅）
-	if err := taskAdjustFunding(task, -quota); err != nil {
+	other := taskBillingOther(task)
+	other["task_id"] = task.TaskID
+	other["reason"] = reason
+	consumeParams := model.RecordConsumeLogParams{
+		ChannelId: task.ChannelId, ModelName: taskModelName(task), Quota: quota,
+		TokenId: task.PrivateData.TokenId, Group: task.Group, Other: other,
+	}
+
+	// 1. Refund the funding source. TensorGrid commits the wallet change and
+	// its outbox event atomically.
+	appliedDelta, err := taskAdjustFunding(
+		task, -quota, fmt.Sprintf("task:%d:refund", task.ID), consumeParams,
+	)
+	if err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("退还资金来源失败 task %s: %s", task.TaskID, err.Error()))
+		return false
+	}
+	if appliedDelta != -quota {
+		logger.LogWarn(ctx, fmt.Sprintf("task refund was incomplete for %s: applied=%d expected=%d", task.TaskID, appliedDelta, -quota))
 		return false
 	}
 
@@ -188,9 +221,6 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 	model.UpdateChannelUsedQuota(task.ChannelId, -quota)
 
 	// 4. 记录日志
-	other := taskBillingOther(task)
-	other["task_id"] = task.TaskID
-	other["reason"] = reason
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:    task.UserId,
 		LogType:   model.LogTypeRefund,
@@ -237,8 +267,25 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		reason,
 	))
 
+	other := taskBillingOther(task)
+	other["task_id"] = task.TaskID
+	other["pre_consumed_quota"] = preConsumedQuota
+	other["actual_quota"] = actualQuota
+	for _, clamp := range clamps {
+		attachQuotaSaturationToOther(other, clamp)
+	}
+	consumeParams := model.RecordConsumeLogParams{
+		ChannelId: task.ChannelId, ModelName: taskModelName(task), Quota: quotaDelta,
+		TokenId: task.PrivateData.TokenId, Group: task.Group, Other: other,
+	}
+
 	// 调整资金来源
-	if err := taskAdjustFunding(task, quotaDelta); err != nil {
+	_, err := taskAdjustFunding(
+		task, quotaDelta,
+		fmt.Sprintf("task:%d:recalculate:%d:%d", task.ID, preConsumedQuota, actualQuota),
+		consumeParams,
+	)
+	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("差额结算资金调整失败 task %s: %s", task.TaskID, err.Error()))
 		return
 	}
@@ -263,13 +310,6 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	} else {
 		logType = model.LogTypeRefund
 		logQuota = -quotaDelta
-	}
-	other := taskBillingOther(task)
-	other["task_id"] = task.TaskID
-	other["pre_consumed_quota"] = preConsumedQuota
-	other["actual_quota"] = actualQuota
-	for _, clamp := range clamps {
-		attachQuotaSaturationToOther(other, clamp)
 	}
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:    task.UserId,

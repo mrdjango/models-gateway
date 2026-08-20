@@ -98,6 +98,23 @@ func (TensorGridBillingSettlement) TableName() string {
 	return "tensorgrid_billing_settlements"
 }
 
+// TensorGridBillingAdjustment journals wallet changes that happen outside the
+// request reservation lifecycle, such as asynchronous task reconciliation and
+// violation fees. The wallet update and its outbox event commit atomically.
+type TensorGridBillingAdjustment struct {
+	Id                  int64     `json:"id" gorm:"primaryKey"`
+	AccountId           int64     `json:"account_id" gorm:"not null;index;uniqueIndex:tensorgrid_adjustment_account_request"`
+	RequestId           string    `json:"request_id" gorm:"type:varchar(128);not null;uniqueIndex:tensorgrid_adjustment_account_request"`
+	RequestedQuotaDelta int       `json:"requested_quota_delta" gorm:"not null"`
+	AppliedQuotaDelta   int       `json:"applied_quota_delta" gorm:"not null"`
+	BalanceQuotaAfter   int       `json:"balance_quota_after" gorm:"not null"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+func (TensorGridBillingAdjustment) TableName() string {
+	return "tensorgrid_billing_adjustments"
+}
+
 type TensorGridBalanceMutation struct {
 	Id                    int64     `json:"id" gorm:"primaryKey"`
 	AccountId             int64     `json:"account_id" gorm:"not null;index;uniqueIndex:tensorgrid_mutation_account_key"`
@@ -313,6 +330,17 @@ func GetTensorGridAccount(subject string) (*TensorGridAccount, error) {
 		return nil, err
 	}
 	return &account, nil
+}
+
+func IsTensorGridUser(userID int) (bool, error) {
+	if !tensorGridIntegrationConfigured() {
+		return false, nil
+	}
+	var count int64
+	if err := DB.Model(&TensorGridAccount{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func quotaToMicroUSD(quota int) (int64, error) {
