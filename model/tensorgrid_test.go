@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +26,11 @@ func setupTensorGridModelTest(t *testing.T) {
 	previousOptionMap := common.OptionMap
 	previousBillingModes := billing_setting.GetBillingModeCopy()
 	previousBillingExpressions := billing_setting.GetBillingExprCopy()
+	previousModelRatios := ratio_setting.GetModelRatioCopy()
+	previousModelPrices := ratio_setting.GetModelPriceCopy()
+	previousCompletionRatios := ratio_setting.GetCompletionRatioCopy()
+	previousCacheRatios := ratio_setting.GetCacheRatioCopy()
+	previousCreateCacheRatios := ratio_setting.GetCreateCacheRatioCopy()
 
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
@@ -40,6 +46,7 @@ func setupTensorGridModelTest(t *testing.T) {
 		&User{}, &Token{}, &Channel{}, &Ability{}, &Option{}, &Log{}, &TensorGridAccount{},
 		&TensorGridBalanceMutation{}, &TensorGridTokenCreation{}, &TensorGridCreditOutbox{},
 		&TensorGridBillingSettlement{}, &TensorGridBillingAdjustment{},
+		&Model{}, &Vendor{},
 	))
 
 	t.Cleanup(func() {
@@ -48,6 +55,15 @@ func setupTensorGridModelTest(t *testing.T) {
 		}
 		if expressions, marshalErr := common.Marshal(previousBillingExpressions); marshalErr == nil {
 			_ = UpdateOption("billing_setting.billing_expr", string(expressions))
+		}
+		for key, value := range map[string]interface{}{
+			"ModelRatio": previousModelRatios, "ModelPrice": previousModelPrices,
+			"CompletionRatio": previousCompletionRatios, "CacheRatio": previousCacheRatios,
+			"CreateCacheRatio": previousCreateCacheRatios,
+		} {
+			if encoded, marshalErr := common.Marshal(value); marshalErr == nil {
+				_ = UpdateOption(key, string(encoded))
+			}
 		}
 		common.OptionMapRWMutex.Lock()
 		common.OptionMap = previousOptionMap
