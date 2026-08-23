@@ -141,6 +141,54 @@ func tensorGridMicroUSD(dollarsPerMillion float64) int64 {
 	return int64(math.Round(value))
 }
 
+// tensorGridPublicModalities 推导模型实际接受与产出的模态，供前端按输入类型筛选。
+// 端点决定基础模态；只有对话类端点才用计价倍率补充多模态输入，
+// 因为像语音转写这类端点的模态由端点本身唯一确定，
+// 此时残留的 image/audio 倍率并不代表该端点真的接受这些输入。
+func tensorGridPublicModalities(row model.Pricing, endpoints []string) ([]string, []string) {
+	inputs := make([]string, 0, 3)
+	outputs := make([]string, 0, 2)
+	add := func(list []string, value string) []string {
+		for _, existing := range list {
+			if existing == value {
+				return list
+			}
+		}
+		return append(list, value)
+	}
+
+	for _, endpoint := range endpoints {
+		switch endpoint {
+		case "audio.transcriptions":
+			inputs = add(inputs, "audio")
+			outputs = add(outputs, "text")
+		case "images.generations":
+			inputs = add(inputs, "text")
+			outputs = add(outputs, "image")
+		case "videos":
+			inputs = add(inputs, "text")
+			outputs = add(outputs, "video")
+		case "embeddings":
+			inputs = add(inputs, "text")
+			outputs = add(outputs, "embedding")
+		default:
+			// 对话类端点：文本必有，图像与音频取决于是否配置了对应倍率。
+			inputs = add(inputs, "text")
+			outputs = add(outputs, "text")
+			if row.ImageRatio != nil {
+				inputs = add(inputs, "image")
+			}
+			if row.AudioRatio != nil {
+				inputs = add(inputs, "audio")
+			}
+			if row.AudioCompletionRatio != nil {
+				outputs = add(outputs, "audio")
+			}
+		}
+	}
+	return inputs, outputs
+}
+
 func tensorGridPublicModel(row model.Pricing) gin.H {
 	endpoints := make([]string, 0, len(row.SupportedEndpointTypes))
 	capabilities := gin.H{}
@@ -181,13 +229,16 @@ func tensorGridPublicModel(row model.Pricing) gin.H {
 			capabilities["text"] = true
 		}
 	}
+	inputModalities, outputModalities := tensorGridPublicModalities(row, endpoints)
 	return gin.H{
-		"id":           row.ModelName,
-		"name":         row.ModelName,
-		"category":     category,
-		"capabilities": capabilities,
-		"endpoints":    endpoints,
-		"pricing":      tensorGridPublicPricing(row),
+		"id":                row.ModelName,
+		"name":              row.ModelName,
+		"category":          category,
+		"capabilities":      capabilities,
+		"endpoints":         endpoints,
+		"input_modalities":  inputModalities,
+		"output_modalities": outputModalities,
+		"pricing":           tensorGridPublicPricing(row),
 	}
 }
 

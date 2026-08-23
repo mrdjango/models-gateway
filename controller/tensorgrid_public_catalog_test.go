@@ -101,3 +101,80 @@ func TestTensorGridPublicModelTranscription(t *testing.T) {
 	assert.Equal(t, true, public["capabilities"].(gin.H)["audio"])
 	assert.NotContains(t, public["capabilities"].(gin.H), "text")
 }
+
+// 输入模态用于前端按“接受什么类型的输入”筛选，必须由端点决定，
+// 而不是由残留的计价倍率决定。
+func TestTensorGridPublicModelModalities(t *testing.T) {
+	imageRatio := 2.0
+	audioRatio := 3.0
+	audioCompletionRatio := 1.5
+
+	cases := []struct {
+		name            string
+		row             model.Pricing
+		expectedInputs  []string
+		expectedOutputs []string
+	}{
+		{
+			name: "plain chat model is text only",
+			row: model.Pricing{
+				SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAI},
+			},
+			expectedInputs:  []string{"text"},
+			expectedOutputs: []string{"text"},
+		},
+		{
+			name: "multimodal chat model reports image and audio input",
+			row: model.Pricing{
+				SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAI},
+				ImageRatio:             &imageRatio,
+				AudioRatio:             &audioRatio,
+				AudioCompletionRatio:   &audioCompletionRatio,
+			},
+			expectedInputs:  []string{"text", "image", "audio"},
+			expectedOutputs: []string{"text", "audio"},
+		},
+		{
+			name: "transcription takes audio in and text out",
+			row: model.Pricing{
+				SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAIAudioTranscription},
+			},
+			expectedInputs:  []string{"audio"},
+			expectedOutputs: []string{"text"},
+		},
+		{
+			// 回归：ASR 模型上误配的 image 倍率不得把它标成接受图像输入。
+			name: "stray image ratio does not leak into a transcription model",
+			row: model.Pricing{
+				SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAIAudioTranscription},
+				ImageRatio:             &imageRatio,
+			},
+			expectedInputs:  []string{"audio"},
+			expectedOutputs: []string{"text"},
+		},
+		{
+			name: "image generation takes text in and image out",
+			row: model.Pricing{
+				SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeImageGeneration},
+			},
+			expectedInputs:  []string{"text"},
+			expectedOutputs: []string{"image"},
+		},
+		{
+			name: "embeddings report an embedding output",
+			row: model.Pricing{
+				SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeEmbeddings},
+			},
+			expectedInputs:  []string{"text"},
+			expectedOutputs: []string{"embedding"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			public := tensorGridPublicModel(tc.row)
+			assert.Equal(t, tc.expectedInputs, public["input_modalities"])
+			assert.Equal(t, tc.expectedOutputs, public["output_modalities"])
+		})
+	}
+}
