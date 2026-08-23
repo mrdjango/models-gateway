@@ -115,6 +115,30 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 	return usage
 }
 
+// stripUpstreamCost 移除上游 usage 中的 cost 字段。
+// 该字段是网关向上游支付的采购价（例如 OpenRouter 的 usage.cost），
+// 透传给调用方等于泄露进价与利润率，而且它与本网关实际扣费的金额并不相同。
+// 非 JSON 响应（response_format=text/srt/vtt）与不含 cost 的响应原样返回。
+func stripUpstreamCost(responseBody []byte) []byte {
+	var payload map[string]any
+	if err := common.Unmarshal(responseBody, &payload); err != nil {
+		return responseBody
+	}
+	usage, ok := payload["usage"].(map[string]any)
+	if !ok {
+		return responseBody
+	}
+	if _, hasCost := usage["cost"]; !hasCost {
+		return responseBody
+	}
+	delete(usage, "cost")
+	rewritten, err := common.Marshal(payload)
+	if err != nil {
+		return responseBody
+	}
+	return rewritten
+}
+
 func OpenaiSTTHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, responseFormat string) (*types.NewAPIError, *dto.Usage) {
 	defer service.CloseResponseBodyGracefully(resp)
 
@@ -122,40 +146,44 @@ func OpenaiSTTHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
-	// 写入新的 response body
-	service.IOCopyBytesGracefully(c, resp, responseBody)
+	// 写入新的 response body（先剥离上游成本，避免把采购价透传给调用方）
+	service.IOCopyBytesGracefully(c, resp, stripUpstreamCost(responseBody))
 
 	var responseData struct {
 		Usage *dto.Usage `json:"usage"`
 	}
-	if err := common.Unmarshal(responseBody, &responseData); err == nil && responseData.Usage != nil {
-		if responseData.Usage.TotalTokens > 0 {
-			usage := responseData.Usage
-			if usage.PromptTokens == 0 {
-				usage.PromptTokens = usage.InputTokens
-			}
-			if usage.CompletionTokens == 0 {
-				usage.CompletionTokens = usage.OutputTokens
-			}
-			return nil, usage
+	usage := &dto.Usage{}
+	if err := common.Unmarshal(responseBody, &responseData); err == nil &&
+		responseData.Usage != nil && responseData.Usage.TotalTokens > 0 {
+		usage = responseData.Usage
+		if usage.PromptTokens == 0 {
+			usage.PromptTokens = usage.InputTokens
 		}
+		if usage.CompletionTokens == 0 {
+			usage.CompletionTokens = usage.OutputTokens
+		}
+	} else {
+		// 部分 STT 上游（例如 OpenRouter 的 grok-stt、qwen3-asr）只回 usage.seconds 而不回 token，
+		// 此时按上游给出的实际时长计费，比本地估算更准确。
+		var durationData struct {
+			Usage struct {
+				Seconds float64 `json:"seconds"`
+			} `json:"usage"`
+		}
+		if err := common.Unmarshal(responseBody, &durationData); err == nil && durationData.Usage.Seconds > 0 {
+			// seconds 来自上游，可能是异常大的数值，交由 QuotaRound 做饱和转换。
+			usage.PromptTokens = common.QuotaRound(math.Ceil(durationData.Usage.Seconds) / 60.0 * 1000)
+		} else {
+			usage.PromptTokens = info.GetEstimatePromptTokens()
+		}
+		usage.CompletionTokens = 0
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
 
-	// 部分 STT 上游（例如 OpenRouter 的 grok-stt、qwen3-asr）只回 usage.seconds 而不回 token，
-	// 此时按上游给出的实际时长计费，比本地估算更准确。
-	var durationData struct {
-		Usage struct {
-			Seconds float64 `json:"seconds"`
-		} `json:"usage"`
+	// 转写的输入本身就是音频。只有把它记为音频 token，AudioHelper 才会走音频计费路径，
+	// 模型上配置的 audio_ratio / audio 价格才会真正生效；否则一律按文本价计费。
+	if usage.PromptTokensDetails.AudioTokens == 0 && usage.PromptTokensDetails.TextTokens == 0 {
+		usage.PromptTokensDetails.AudioTokens = usage.PromptTokens
 	}
-	usage := &dto.Usage{}
-	if err := common.Unmarshal(responseBody, &durationData); err == nil && durationData.Usage.Seconds > 0 {
-		// seconds 来自上游，可能是异常大的数值，交由 QuotaRound 做饱和转换。
-		usage.PromptTokens = common.QuotaRound(math.Ceil(durationData.Usage.Seconds) / 60.0 * 1000)
-	} else {
-		usage.PromptTokens = info.GetEstimatePromptTokens()
-	}
-	usage.CompletionTokens = 0
-	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	return nil, usage
 }

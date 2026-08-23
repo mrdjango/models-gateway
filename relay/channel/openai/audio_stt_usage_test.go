@@ -72,3 +72,78 @@ func TestOpenaiSTTHandlerUsage(t *testing.T) {
 		})
 	}
 }
+
+// 上游的 usage.cost 是采购价，绝不能透传给调用方。
+func TestStripUpstreamCost(t *testing.T) {
+	cases := []struct {
+		name           string
+		body           string
+		expectStripped bool
+	}{
+		{
+			name:           "openrouter cost is removed",
+			body:           `{"text":"hi","usage":{"seconds":5,"cost":0.000175}}`,
+			expectStripped: true,
+		},
+		{
+			name:           "token usage without cost is untouched",
+			body:           `{"text":"hi","usage":{"total_tokens":395,"input_tokens":3}}`,
+			expectStripped: false,
+		},
+		{
+			name:           "plain text response is untouched",
+			body:           "سلام میشاد چطوری خوبی؟",
+			expectStripped: false,
+		},
+		{
+			name:           "response without usage is untouched",
+			body:           `{"text":"hi"}`,
+			expectStripped: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := string(stripUpstreamCost([]byte(tc.body)))
+			assert.NotContains(t, out, `"cost"`)
+			if tc.expectStripped {
+				// 其余字段必须保留，只有 cost 消失。
+				assert.Contains(t, out, `"seconds"`)
+				assert.Contains(t, out, `"text"`)
+			} else {
+				assert.Equal(t, tc.body, out)
+			}
+		})
+	}
+}
+
+// 转写必须记为音频输入，否则 AudioHelper 会走文本计费路径，
+// 模型上配置的 audio_ratio 永远不会生效。
+func TestOpenaiSTTHandlerMarksAudioInput(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "seconds only upstream", body: `{"text":"hi","usage":{"seconds":60,"cost":0.0021}}`},
+		{name: "token upstream", body: `{"text":"hi","usage":{"total_tokens":395,"input_tokens":3,"output_tokens":17}}`},
+		{name: "no usage at all", body: `{"text":"hi"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+
+			info := &relaycommon.RelayInfo{}
+			info.SetEstimatePromptTokens(42)
+
+			apiErr, usage := OpenaiSTTHandler(c, newSTTResponse(tc.body), info, "")
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Positive(t, usage.PromptTokens)
+			assert.Equal(t, usage.PromptTokens, usage.PromptTokensDetails.AudioTokens,
+				"transcription input must be billed through the audio path")
+		})
+	}
+}
