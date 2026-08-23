@@ -84,3 +84,20 @@ func TestTensorGridPublicCatalogUsesRequestMeterForFixedPricing(t *testing.T) {
 	assert.Equal(t, int64(40_000), pricing["extra_meters"].(gin.H)["request"])
 	assert.Equal(t, int64(0), pricing["input_per_million_microusd"])
 }
+
+// 语音转写模型必须以 audio.transcriptions 端点和 transcription 分类对外暴露，
+// 否则前端只能把它当作普通 chat 模型展示与筛选。
+func TestTensorGridPublicModelTranscription(t *testing.T) {
+	row := model.Pricing{
+		ModelName: "qwen/qwen3-asr-flash-2026-02-10",
+		SupportedEndpointTypes: []constant.EndpointType{
+			constant.EndpointTypeOpenAIAudioTranscription,
+		},
+	}
+
+	public := tensorGridPublicModel(row)
+	assert.Equal(t, []string{"audio.transcriptions"}, public["endpoints"])
+	assert.Equal(t, "transcription", public["category"])
+	assert.Equal(t, true, public["capabilities"].(gin.H)["audio"])
+	assert.NotContains(t, public["capabilities"].(gin.H), "text")
+}

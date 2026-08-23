@@ -41,6 +41,8 @@ func tensorGridPublicEndpoint(value string) string {
 		return "rerank"
 	case "openai-video":
 		return "videos"
+	case "openai-audio-transcription":
+		return "audio.transcriptions"
 	default:
 		return ""
 	}
@@ -171,6 +173,10 @@ func tensorGridPublicModel(row model.Pricing) gin.H {
 		case "rerank":
 			capabilities["rerank"] = true
 			category = "rerank"
+		case "audio.transcriptions":
+			// 语音转写模型的输入是音频、输出是文本，不能落入默认的 text 分类。
+			capabilities["audio"] = true
+			category = "transcription"
 		default:
 			capabilities["text"] = true
 		}
