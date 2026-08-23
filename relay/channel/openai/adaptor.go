@@ -376,6 +376,19 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
 	a.ResponseFormat = request.ResponseFormat
+	// OpenRouter 的内联 base64 音频以 JSON 转发，只发送转录语义的字段。
+	if channel.HasInlineAudio(info) {
+		jsonData, err := common.Marshal(dto.InlineAudioTranscriptionRequest{
+			Model:          request.Model,
+			InputAudio:     request.InputAudio,
+			Language:       request.Language,
+			ResponseFormat: request.ResponseFormat,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error marshalling object: %w", err)
+		}
+		return bytes.NewReader(jsonData), nil
+	}
 	if info.RelayMode == relayconstant.RelayModeAudioSpeech {
 		jsonData, err := common.Marshal(request)
 		if err != nil {
@@ -621,8 +634,8 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
-	if info.RelayMode == relayconstant.RelayModeAudioTranscription ||
-		info.RelayMode == relayconstant.RelayModeAudioTranslation ||
+	if ((info.RelayMode == relayconstant.RelayModeAudioTranscription ||
+		info.RelayMode == relayconstant.RelayModeAudioTranslation) && !channel.HasInlineAudio(info)) ||
 		(info.RelayMode == relayconstant.RelayModeImagesEdits && !isJSONRequest(c)) {
 		return channel.DoFormRequest(a, c, info, requestBody)
 	} else if info.RelayMode == relayconstant.RelayModeRealtime {

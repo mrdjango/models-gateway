@@ -141,8 +141,20 @@ func OpenaiSTTHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 		}
 	}
 
+	// 部分 STT 上游（例如 OpenRouter 的 grok-stt、qwen3-asr）只回 usage.seconds 而不回 token，
+	// 此时按上游给出的实际时长计费，比本地估算更准确。
+	var durationData struct {
+		Usage struct {
+			Seconds float64 `json:"seconds"`
+		} `json:"usage"`
+	}
 	usage := &dto.Usage{}
-	usage.PromptTokens = info.GetEstimatePromptTokens()
+	if err := common.Unmarshal(responseBody, &durationData); err == nil && durationData.Usage.Seconds > 0 {
+		// seconds 来自上游，可能是异常大的数值，交由 QuotaRound 做饱和转换。
+		usage.PromptTokens = common.QuotaRound(math.Ceil(durationData.Usage.Seconds) / 60.0 * 1000)
+	} else {
+		usage.PromptTokens = info.GetEstimatePromptTokens()
+	}
 	usage.CompletionTokens = 0
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	return nil, usage

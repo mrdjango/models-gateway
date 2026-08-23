@@ -1659,6 +1659,52 @@
                   "model"
                 ]
               }
+            },
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "内联 base64 音频，仅 OpenRouter 渠道支持",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "example": "qwen/qwen3-asr-flash-2026-02-10"
+                  },
+                  "input_audio": {
+                    "type": "object",
+                    "description": "内联音频，等价于 multipart 的 file 字段",
+                    "properties": {
+                      "data": {
+                        "type": "string",
+                        "description": "base64 编码的音频，可带 data: URI 前缀",
+                        "example": ""
+                      },
+                      "format": {
+                        "type": "string",
+                        "description": "音频容器格式，例如 wav/mp3/m4a",
+                        "example": "wav"
+                      }
+                    },
+                    "required": [
+                      "data",
+                      "format"
+                    ]
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "ISO-639-1 语言代码",
+                    "example": ""
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "description": "不传则由上游决定默认值",
+                    "example": ""
+                  }
+                },
+                "required": [
+                  "model",
+                  "input_audio"
+                ]
+              }
             }
           },
           "required": true

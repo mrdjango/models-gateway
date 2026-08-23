@@ -8,9 +8,25 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
+// AudioInput 承载 JSON 形式的内联音频，等价于 multipart 上传的 file 字段。
+type AudioInput struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
+}
+
+// InlineAudioTranscriptionRequest 是内联 base64 音频转录/翻译发往上游的请求体。
+// 只保留转录语义的字段，避免把 AudioRequest 中 TTS 专用的 input/voice 混入上游请求。
+type InlineAudioTranscriptionRequest struct {
+	Model          string          `json:"model"`
+	InputAudio     *AudioInput     `json:"input_audio"`
+	Language       json.RawMessage `json:"language,omitempty"`
+	ResponseFormat string          `json:"response_format,omitempty"`
+}
+
 type AudioRequest struct {
 	Model          string          `json:"model"`
 	Input          string          `json:"input"`
+	InputAudio     *AudioInput     `json:"input_audio,omitempty"`
 	Voice          string          `json:"voice"`
 	Instructions   string          `json:"instructions,omitempty"`
 	ResponseFormat string          `json:"response_format,omitempty"`

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -57,6 +58,9 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 	return request, err
 }
 
+// base64 载荷里可能夹带的空白字符，解码前统一剔除。
+var inlineAudioWhitespace = strings.NewReplacer("\n", "", "\r", "", "\t", "", " ", "")
+
 func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, error) {
 	audioRequest := &dto.AudioRequest{}
 	err := common.UnmarshalBodyReusable(c, audioRequest)
@@ -72,8 +76,28 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 		if audioRequest.Model == "" {
 			return nil, errors.New("model is required")
 		}
-		if audioRequest.ResponseFormat == "" {
+		// OpenRouter 的内联 base64 音频保持客户端原样：上游按自身默认返回，不注入 response_format。
+		isOpenRouterInlineAudio := audioRequest.InputAudio != nil &&
+			common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeOpenRouter
+		if audioRequest.ResponseFormat == "" && !isOpenRouterInlineAudio {
 			audioRequest.ResponseFormat = "json"
+		}
+		if isOpenRouterInlineAudio {
+			// 在此规范化，使计费时的解码与转发给上游的内容始终是同一份 base64。
+			// 客户端常见的两种写法：带 data: URI 前缀，以及 base64 命令换行后未剔除换行符。
+			data := audioRequest.InputAudio.Data
+			if strings.HasPrefix(data, "data:") {
+				if idx := strings.Index(data, ";base64,"); idx >= 0 {
+					data = data[idx+len(";base64,"):]
+				}
+			}
+			audioRequest.InputAudio.Data = inlineAudioWhitespace.Replace(data)
+			if audioRequest.InputAudio.Data == "" {
+				return nil, errors.New("input_audio.data is required")
+			}
+			if audioRequest.InputAudio.Format == "" {
+				return nil, errors.New("input_audio.format is required, for example wav, mp3 or m4a")
+			}
 		}
 	}
 	return audioRequest, nil

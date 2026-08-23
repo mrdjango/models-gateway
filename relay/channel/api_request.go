@@ -12,10 +12,12 @@ import (
 	"time"
 
 	common2 "github.com/QuantumNous/new-api/common"
+	constant2 "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -48,9 +50,26 @@ func ApplyUpstreamBodyMetadata(req *http.Request, body io.Reader) {
 	}
 }
 
+// HasInlineAudio 表示这是 OpenRouter 以 JSON 内联 base64 音频提交的转录/翻译请求，
+// 应按 JSON 而非 multipart 转发。其他渠道仍走 OpenAI 原生的 multipart 上传。
+func HasInlineAudio(info *common.RelayInfo) bool {
+	// ChannelMeta 由 InitChannelMeta 填充，早于该阶段的调用方拿到的仍是 nil。
+	if info == nil || info.ChannelMeta == nil || info.ChannelType != constant2.ChannelTypeOpenRouter {
+		return false
+	}
+	if info.RelayMode != constant.RelayModeAudioTranscription && info.RelayMode != constant.RelayModeAudioTranslation {
+		return false
+	}
+	audioReq, ok := info.Request.(*dto.AudioRequest)
+	return ok && audioReq.InputAudio != nil
+}
+
 func SetupApiRequestHeader(info *common.RelayInfo, c *gin.Context, req *http.Header) {
 	if info.RelayMode == constant.RelayModeAudioTranscription || info.RelayMode == constant.RelayModeAudioTranslation {
-		// multipart/form-data
+		// multipart/form-data 由 DoFormRequest 自行设置；内联 base64 音频走 JSON。
+		if HasInlineAudio(info) {
+			req.Set("Content-Type", "application/json")
+		}
 	} else if info.RelayMode == constant.RelayModeRealtime {
 		// websocket
 	} else {

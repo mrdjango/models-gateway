@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -18,6 +20,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// 音频时长为 0 意味着无法计量，按 0 计费等同于免费放行，因此统一拒绝。
+var errAudioDurationNotMeasurable = errors.New("unable to determine audio duration, the audio may be empty or its format does not match the actual data")
 
 func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, stream bool) (int, error) {
 	if fileMeta == nil || fileMeta.Source == nil {
@@ -190,6 +195,28 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 		return 0, nil
 	}
 	if info.RelayMode == constant2.RelayModeAudioTranscription || info.RelayMode == constant2.RelayModeAudioTranslation {
+		// OpenRouter 的 JSON 内联音频（input_audio.data 为 base64），与 multipart 上传等价。
+		// 此处早于 InitChannelMeta，info.ChannelMeta 仍为 nil，渠道类型只能从上下文读取。
+		audioReq, isAudioReq := info.Request.(*dto.AudioRequest)
+		isOpenRouter := common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeOpenRouter
+		if isAudioReq && isOpenRouter && audioReq.InputAudio != nil {
+			audioBytes, err := base64.StdEncoding.DecodeString(audioReq.InputAudio.Data)
+			if err != nil {
+				return 0, fmt.Errorf("error decoding input_audio data: %v", err)
+			}
+			ext := "." + strings.TrimPrefix(strings.ToLower(audioReq.InputAudio.Format), ".")
+			duration, err := common.GetAudioDuration(c.Request.Context(), bytes.NewReader(audioBytes), ext)
+			if err != nil {
+				return 0, fmt.Errorf("error getting audio duration: %v", err)
+			}
+			// duration 解析自用户提供的音频头部，可被伪造成负数，也可能因格式与实际字节
+			// 不符而被解析成 0。无法计量的音频不能按 0 计费，直接拒绝；正值再由
+			// QuotaRound 做饱和转换。
+			if duration <= 0 {
+				return 0, errAudioDurationNotMeasurable
+			}
+			return common.QuotaRound(math.Ceil(duration) / 60.0 * 1000), nil
+		}
 		multiForm, err := common.ParseMultipartFormReusable(c)
 		if err != nil {
 			return 0, fmt.Errorf("error parsing multipart form: %v", err)
@@ -208,10 +235,11 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 			if err != nil {
 				return 0, fmt.Errorf("error getting audio duration: %v", err)
 			}
-			// duration 来自用户上传文件的元数据，可被伪造成天文数字或负数。
-			// 负值会让 token 估算变成负数（低估预扣费），先钳到 0 再转换。
-			if duration < 0 {
-				duration = 0
+			// duration 来自用户上传文件的元数据，可被伪造成天文数字或负数，也可能因
+			// 扩展名与实际字节不符而被解析成 0（例如把 WAV 命名为 .mp3）。
+			// 无法计量的音频不能按 0 计费，直接拒绝；正值再由 QuotaRound 做饱和转换。
+			if duration <= 0 {
+				return 0, errAudioDurationNotMeasurable
 			}
 			// 一分钟 1000 token，与 $price / minute 对齐。
 			totalAudioToken += common.QuotaRound(math.Ceil(duration) / 60.0 * 1000)
