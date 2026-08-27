@@ -396,7 +396,7 @@ func AdjustTensorGridWalletQuota(userID int, requestID string, requestedQuotaDel
 			appliedQuotaDelta = user.Quota
 		}
 		balanceAfter := int64(user.Quota) - int64(appliedQuotaDelta)
-		if balanceAfter < 0 || balanceAfter > int64(common.MaxQuota) {
+		if balanceAfter < 0 || balanceAfter > int64(common.MaxWalletQuota) {
 			return errors.New("TensorGrid billing adjustment would move the balance outside the supported range")
 		}
 

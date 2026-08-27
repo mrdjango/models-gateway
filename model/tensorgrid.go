@@ -579,7 +579,7 @@ func tensorGridAmountToQuota(amountMinor, amountMicroUSD int64, account *TensorG
 		amountMicroUSDDecimal = decimal.NewFromInt(amountMinor).Mul(decimal.NewFromInt(1_000_000)).Div(rate)
 	}
 	quotaDecimal := amountMicroUSDDecimal.Mul(decimal.NewFromFloat(common.QuotaPerUnit)).Div(decimal.NewFromInt(1_000_000))
-	quota, err := common.QuotaFromDecimalStrict(quotaDecimal)
+	quota, err := common.WalletQuotaFromDecimalStrict(quotaDecimal)
 	if err != nil {
 		return 0, err
 	}
@@ -663,7 +663,7 @@ func AdjustTensorGridBalance(
 			return err
 		}
 		balance64 := int64(user.Quota) + int64(appliedQuotaDelta)
-		if balance64 < 0 || balance64 > int64(common.MaxQuota) {
+		if balance64 < 0 || balance64 > int64(common.MaxWalletQuota) {
 			return errors.New("gateway balance is outside the supported range")
 		}
 		balanceAfter = int(balance64)

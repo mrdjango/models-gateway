@@ -632,3 +632,41 @@ func TestTensorGridUsageTotalsCoverAllFilteredRowsNotOnlyThePage(t *testing.T) {
 	assert.Equal(t, int64(3), totals.CacheReadTokens)
 	assert.Equal(t, int64(4), totals.CacheWriteTokens)
 }
+
+// 钱包余额上限跟随 common.MaxWalletQuota（64 位），而非单次请求的 int32 上限：
+// 上游的充值/兑换路径已经允许余额越过 int32，TensorGrid 的入账与结算必须跟上，
+// 否则余额一旦超过 int32 就会在扣费时报错，请求被免费放行且不产生入账事件。
+func TestTensorGridWalletSupportsBalanceAboveSingleRequestBound(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "0f4c1d67-2f2e-4a5b-9d61-6b0f5a8e4c31"
+
+	account, err := UpsertTensorGridAccount(subject, "whale@example.com", "Whale", "USD", "", true, 1)
+	require.NoError(t, err)
+
+	// $5,000 = 500_000 分 → 2_500_000_000 quota，超出 common.MaxQuota。
+	credited, created, _, _, err := AdjustTensorGridBalance(subject, "payment:whale:0001", "USD", 500_000, 0, "large purchase", false)
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, 2_500_000_000, credited.BalanceQuota)
+	assert.Greater(t, credited.BalanceQuota, common.MaxQuota)
+	assert.Equal(t, int64(500_000), credited.BalanceMinor)
+	assert.Equal(t, int64(5_000_000_000), credited.BalanceMicroUSD)
+
+	// 余额高于 int32 时，单次扣费仍须正常结算并入账。
+	handled, applied, err := AdjustTensorGridWalletQuota(
+		account.UserId, "req:whale:0001", 1_000_000,
+		RecordConsumeLogParams{ModelName: "whale-model"},
+	)
+	require.NoError(t, err)
+	assert.True(t, handled)
+	assert.Equal(t, 1_000_000, applied)
+
+	user, err := GetUserById(account.UserId, true)
+	require.NoError(t, err)
+	assert.Equal(t, 2_499_000_000, user.Quota)
+
+	var chargeOutbox TensorGridCreditOutbox
+	require.NoError(t, DB.Where("request_id = ?", "req:whale:0001").First(&chargeOutbox).Error)
+	assert.Equal(t, int64(-2_000_000), chargeOutbox.DeltaMicroUSD)
+	assert.Equal(t, int64(4_998_000_000), chargeOutbox.BalanceMicroUSD)
+}
