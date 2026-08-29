@@ -17,6 +17,11 @@ import (
 const (
 	TensorGridCurrencyUSD = "USD"
 	TensorGridCurrencyIRT = "IRT"
+
+	// tensorGridFxRateMaxLen matches the fx_rate_irt_per_usd column width.
+	tensorGridFxRateMaxLen = 64
+	// tensorGridReasonMaxLen matches the balance-mutation reason column width.
+	tensorGridReasonMaxLen = 255
 )
 
 var (
@@ -192,7 +197,14 @@ func normalizeTensorGridCurrency(currency, fxRate string) (string, string, error
 	if err != nil || !rate.IsPositive() {
 		return "", "", errors.New("positive fx_rate_irt_per_usd is required for IRT")
 	}
-	return currency, rate.String(), nil
+	// decimal.String renders fixed-point, never exponent form, so an absurd
+	// exponent ("1e1000") becomes a 1000+ char string. Reject anything that
+	// would overflow the fx_rate_irt_per_usd column rather than fail the write.
+	normalized := rate.String()
+	if len(normalized) > tensorGridFxRateMaxLen {
+		return "", "", errors.New("fx_rate_irt_per_usd is out of range")
+	}
+	return currency, normalized, nil
 }
 
 func tensorGridUsername(subject string) string {
@@ -609,8 +621,10 @@ func AdjustTensorGridBalance(
 	}
 	currency = strings.ToUpper(strings.TrimSpace(currency))
 	reason = strings.TrimSpace(reason)
-	if len(reason) > 255 {
-		reason = reason[:255]
+	if reasonRunes := []rune(reason); len(reasonRunes) > tensorGridReasonMaxLen {
+		// Truncate on a rune boundary; a byte slice can split a multi-byte
+		// sequence, which Postgres rejects with SQLSTATE 22021.
+		reason = string(reasonRunes[:tensorGridReasonMaxLen])
 	}
 	created := false
 	var balanceAfter int

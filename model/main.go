@@ -375,6 +375,16 @@ func migrateDB() error {
 
 func migrateDBFast() error {
 
+	// Column-type migrations that AutoMigrate cannot perform must run first,
+	// exactly as in migrateDB(); otherwise this path silently skips them.
+	migrateSubscriptionPlanPriceAmount()
+	if err := migrateTokenModelLimitsToText(); err != nil {
+		return err
+	}
+	if err := migrateTensorGridCreditOutboxIdentifierWidth(); err != nil {
+		return err
+	}
+
 	var wg sync.WaitGroup
 
 	migrations := []struct {

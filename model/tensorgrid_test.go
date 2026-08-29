@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
@@ -149,6 +150,38 @@ func TestTensorGridBalanceRejectsCurrencyMismatchAndOverdraft(t *testing.T) {
 
 	_, _, _, _, err = AdjustTensorGridBalance(subject, "compute:00000002", "IRT", -1, 0, "overdraft", false)
 	assert.ErrorContains(t, err, "insufficient gateway balance")
+}
+
+func TestTensorGridAccountRejectsOutOfRangeFxRate(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "6f3a1d8e-2b4c-4a1e-9f0d-7c8b5a2e1f30"
+
+	// decimal renders "1e1000" as a 1001-char fixed-point string, which would
+	// overflow fx_rate_irt_per_usd varchar(64) and fail the write with 22001.
+	_, err := UpsertTensorGridAccount(subject, "fx@example.com", "Fx", "IRT", "1e1000", true, 1)
+	assert.ErrorContains(t, err, "out of range")
+
+	_, err = UpsertTensorGridAccount(subject, "fx@example.com", "Fx", "IRT", "197150.712115", true, 1)
+	require.NoError(t, err)
+}
+
+func TestTensorGridBalanceAdjustmentTruncatesReasonOnRuneBoundary(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "7a4b2c9d-3e5f-4b2a-8c1d-9e0f6a3b2c41"
+
+	account, err := UpsertTensorGridAccount(subject, "reason@example.com", "Reason", "USD", "", true, 1)
+	require.NoError(t, err)
+
+	// 300 multi-byte runes: a byte slice at [:255] would split one and Postgres
+	// would reject the invalid UTF-8. Rune truncation keeps it valid.
+	longReason := strings.Repeat("é", 300)
+	_, _, _, _, err = AdjustTensorGridBalance(subject, "adjust:rune-reason", "USD", 100, 0, longReason, false)
+	require.NoError(t, err)
+
+	var mutation TensorGridBalanceMutation
+	require.NoError(t, DB.Where("account_id = ?", account.Id).First(&mutation).Error)
+	assert.Equal(t, 255, len([]rune(mutation.Reason)))
+	assert.True(t, utf8.ValidString(mutation.Reason))
 }
 
 func TestTensorGridBalanceRequiresImmediateDatabaseUpdates(t *testing.T) {
