@@ -74,6 +74,18 @@ func TestSanitizeDBErrorKeepsNonDriverErrors(t *testing.T) {
 	assert.Equal(t, err, sanitizeDBError(err))
 }
 
+// 保护契约:驱动/服务端错误须判定为基础设施故障(交由调用方回 5xx),
+// 应用层校验错误不得误判。
+func TestIsDatabaseError(t *testing.T) {
+	assert.False(t, IsDatabaseError(nil))
+	assert.False(t, IsDatabaseError(fmt.Errorf("status must be active or disabled")))
+	assert.False(t, IsDatabaseError(gorm.ErrRecordNotFound))
+
+	assert.True(t, IsDatabaseError(&pgconn.PgError{Code: "22001", Message: "value too long for type character varying(128)"}))
+	assert.True(t, IsDatabaseError(&mysql.MySQLError{Number: 1406, Message: "Data too long for column"}))
+	assert.True(t, IsDatabaseError(fmt.Errorf("create outbox: %w", &pgconn.PgError{Code: "22001"})))
+}
+
 // 保护契约:经 gorm 真实链路,错误日志同时满足 SQL 参数化、驱动错误脱敏、
 // 调用点归因到业务代码;DEBUG=true 恢复参数值与错误原文。
 func TestGormLoggerEndToEndSanitizedOutput(t *testing.T) {

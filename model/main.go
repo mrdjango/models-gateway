@@ -306,6 +306,10 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	// Widen tensorgrid_credit_outboxes identifier columns before AutoMigrate re-reads them
+	if err := migrateTensorGridCreditOutboxIdentifierWidth(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -686,6 +690,64 @@ func migrateTokenModelLimitsToText() error {
 			return fmt.Errorf("failed to migrate %s.%s to text: %w", tableName, columnName, err)
 		}
 		common.SysLog(fmt.Sprintf("Successfully migrated %s.%s to text", tableName, columnName))
+	}
+	return nil
+}
+
+// migrateTensorGridCreditOutboxIdentifierWidth widens tensorgrid_credit_outboxes.event_id
+// and .request_id from the original varchar(128) to varchar(256). The stored values are
+// composed identifiers ("event:<subject>:adjust:<idempotency-key>"), and a 128-character
+// idempotency key plus its prefixes overflows the old width, failing the insert with
+// SQLSTATE 22001. Safe to run repeatedly: it checks the current width first.
+func migrateTensorGridCreditOutboxIdentifierWidth() error {
+	// SQLite ignores varchar length, so there is nothing to migrate.
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		return nil
+	}
+
+	tableName := "tensorgrid_credit_outboxes"
+	if !DB.Migrator().HasTable(tableName) {
+		return nil
+	}
+
+	const targetLength = 256
+	// event_id carries no column default; request_id defaults to the empty string.
+	mysqlColumnDef := map[string]string{
+		"event_id":   fmt.Sprintf("varchar(%d) NOT NULL", targetLength),
+		"request_id": fmt.Sprintf("varchar(%d) NOT NULL DEFAULT ''", targetLength),
+	}
+	for _, columnName := range []string{"event_id", "request_id"} {
+		if !DB.Migrator().HasColumn(&TensorGridCreditOutbox{}, columnName) {
+			continue
+		}
+
+		var currentLength int
+		var alterSQL string
+		if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+			if err := DB.Raw(`SELECT COALESCE(character_maximum_length, 0) FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`,
+				tableName, columnName).Scan(&currentLength).Error; err != nil {
+				common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
+			}
+			alterSQL = fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s TYPE varchar(%d)`, tableName, columnName, targetLength)
+		} else if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+			if err := DB.Raw(`SELECT COALESCE(character_maximum_length, 0) FROM information_schema.columns
+				WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+				tableName, columnName).Scan(&currentLength).Error; err != nil {
+				common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
+			}
+			alterSQL = fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s", tableName, columnName, mysqlColumnDef[columnName])
+		} else {
+			return nil
+		}
+
+		if currentLength >= targetLength {
+			continue
+		}
+		if err := DB.Exec(alterSQL).Error; err != nil {
+			return fmt.Errorf("failed to widen %s.%s to varchar(%d): %w", tableName, columnName, targetLength, err)
+		}
+		common.SysLog(fmt.Sprintf("Successfully widened %s.%s to varchar(%d)", tableName, columnName, targetLength))
 	}
 	return nil
 }

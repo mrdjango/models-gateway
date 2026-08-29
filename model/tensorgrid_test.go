@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,6 +112,29 @@ func TestTensorGridBalanceAdjustmentIsIdempotent(t *testing.T) {
 	assert.True(t, created)
 	assert.Equal(t, int64(75), debited.BalanceMinor)
 	assert.Equal(t, 375_000, debited.BalanceQuota)
+}
+
+func TestTensorGridBalanceAdjustmentStoresFullLengthIdempotencyKeyInOutbox(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "b1c2d3e4-f5a6-4788-9a0b-1c2d3e4f5a6b"
+
+	account, err := UpsertTensorGridAccount(subject, "long@example.com", "Long", "USD", "", true, 1)
+	require.NoError(t, err)
+
+	// The backend accepts idempotency keys up to 128 characters. The gateway then
+	// composes "event:<subject>:adjust:<key>", which must persist without truncation.
+	idempotencyKey := "hold:" + strings.Repeat("a", 128-len("hold:"))
+	require.Len(t, idempotencyKey, 128)
+
+	_, created, _, _, err := AdjustTensorGridBalance(subject, idempotencyKey, "USD", 100, 0, "long key", false)
+	require.NoError(t, err)
+	assert.True(t, created)
+
+	var outbox TensorGridCreditOutbox
+	require.NoError(t, DB.Where("account_id = ?", account.Id).First(&outbox).Error)
+	assert.Equal(t, "adjust:"+idempotencyKey, outbox.RequestId)
+	assert.Equal(t, "event:"+subject+":adjust:"+idempotencyKey, outbox.EventId)
+	assert.LessOrEqual(t, len(outbox.EventId), 256)
 }
 
 func TestTensorGridBalanceRejectsCurrencyMismatchAndOverdraft(t *testing.T) {

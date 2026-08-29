@@ -44,12 +44,16 @@ func (TensorGridAccount) TableName() string { return "tensorgrid_accounts" }
 // authoritative balance after the mutation so a snapshot can repair a missed
 // delivery without replaying a debit.
 type TensorGridCreditOutbox struct {
-	Id              int64      `json:"id" gorm:"primaryKey"`
-	EventId         string     `json:"event_id" gorm:"type:varchar(128);not null;uniqueIndex"`
+	Id int64 `json:"id" gorm:"primaryKey"`
+	// EventId and RequestId hold composed identifiers ("event:<subject>:<request>",
+	// "adjust:<idempotency-key>", ...). The idempotency key alone can be up to 128
+	// characters, so 256 leaves headroom for every prefix; a shorter column here
+	// truncates the row and fails the insert with SQLSTATE 22001.
+	EventId         string     `json:"event_id" gorm:"type:varchar(256);not null;uniqueIndex"`
 	Kind            string     `json:"kind" gorm:"type:varchar(16);not null;index"`
 	Subject         string     `json:"subject" gorm:"type:varchar(36);not null;index"`
 	AccountId       int64      `json:"account_id" gorm:"not null;index"`
-	RequestId       string     `json:"request_id" gorm:"type:varchar(128);not null;default:'';index"`
+	RequestId       string     `json:"request_id" gorm:"type:varchar(256);not null;default:'';index"`
 	Sequence        int64      `json:"sequence" gorm:"not null;index"`
 	Currency        string     `json:"currency" gorm:"type:varchar(3);not null"`
 	DeltaMinor      int64      `json:"delta_minor" gorm:"not null;default:0"`

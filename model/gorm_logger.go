@@ -84,3 +84,18 @@ func sanitizeDBError(err error) error {
 	}
 	return err
 }
+
+// IsDatabaseError reports whether err was produced by the database server or its
+// driver rather than by application-level validation. Callers use it to answer an
+// infrastructure failure with a 5xx instead of misreporting it as a bad request.
+func IsDatabaseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var mysqlErr *mysql.MySQLError
+	var pgErr *pgconn.PgError
+	var chErr *proto.Exception
+	var sqliteErr *sqlitedriver.Error
+	return errors.As(err, &mysqlErr) || errors.As(err, &pgErr) ||
+		errors.As(err, &chErr) || errors.As(err, &sqliteErr)
+}

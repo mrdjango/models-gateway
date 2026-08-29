@@ -39,19 +39,23 @@ type tensorGridTokenRevokeBySecretRequest struct {
 }
 
 func tensorGridError(c *gin.Context, err error) {
-	status := http.StatusBadRequest
-	code := "invalid_request"
 	switch {
 	case errors.Is(err, model.ErrTensorGridAccountNotFound), errors.Is(err, gorm.ErrRecordNotFound):
-		status, code = http.StatusNotFound, "account_not_found"
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "code": "account_not_found", "message": err.Error()})
 	case errors.Is(err, model.ErrTensorGridCurrencyMismatch):
-		status, code = http.StatusConflict, "currency_mismatch"
+		c.JSON(http.StatusConflict, gin.H{"success": false, "code": "currency_mismatch", "message": err.Error()})
 	case errors.Is(err, model.ErrTensorGridIdempotencyConflict):
-		status, code = http.StatusConflict, "idempotency_conflict"
+		c.JSON(http.StatusConflict, gin.H{"success": false, "code": "idempotency_conflict", "message": err.Error()})
 	case strings.Contains(err.Error(), "insufficient"):
-		status, code = http.StatusPaymentRequired, "insufficient_credit"
+		c.JSON(http.StatusPaymentRequired, gin.H{"success": false, "code": "insufficient_credit", "message": err.Error()})
+	case model.IsDatabaseError(err):
+		// A database/driver failure is not the caller's fault: answer 5xx and keep
+		// the raw driver message (which can inline row data) out of the response.
+		common.SysError("tensorgrid internal database error: " + err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "code": "internal_error", "message": "internal error"})
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "code": "invalid_request", "message": err.Error()})
 	}
-	c.JSON(status, gin.H{"success": false, "code": code, "message": err.Error()})
 }
 
 func UpsertTensorGridUser(c *gin.Context) {
