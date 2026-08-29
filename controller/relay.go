@@ -724,6 +724,11 @@ func executeTaskSubmissionWith(
 	task.Quota = result.Quota
 	task.Data = result.TaskData
 	task.Action = relayInfo.Action
+	// 上游在提交阶段就直接失败的任务不可计费：任务行仍然入库供用户查看，
+	// 但额度必须清零并走退款路径。这类任务插入时即为终态，而两个退款入口
+	// （GetAllUnFinishSyncTasks / GetTimedOutUnfinishedTasks）都排除终态任务，
+	// 轮询永远不会再看到它，落到结算分支就会产生一笔无法退还的扣费。
+	immediateFailure := false
 	if immediate := result.Immediate; immediate != nil {
 		task.Status = model.TaskStatus(immediate.Status)
 		task.Progress = immediate.Progress
@@ -732,6 +737,8 @@ func executeTaskSubmissionWith(
 		}
 		if immediate.Status == model.TaskStatusFailure {
 			task.FailReason = immediate.Reason
+			immediateFailure = true
+			task.Quota = 0
 		}
 		if immediate.Url != "" {
 			task.PrivateData.ResultURL = immediate.Url
@@ -745,6 +752,12 @@ func executeTaskSubmissionWith(
 		taskErr = service.TaskErrorWrapperLocal(errors.New("failed to persist task"), "task_insert_failed", http.StatusInternalServerError)
 		diagnostics.failed("insert", "database_error", taskErr, false)
 		return nil, taskErr
+	}
+	// durable 仅用于抑制 defer 中的退款。提交即失败的任务保持 durable=false，
+	// 由该 defer 释放预扣额度（TensorGrid 钱包同时释放预留并回滚信用事件）。
+	if immediateFailure {
+		diagnostics.complete(task, 0)
+		return &taskSubmissionOutcome{Result: result, Task: task, RelayInfo: relayInfo}, nil
 	}
 	durable = true
 	stage = "settle"

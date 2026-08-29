@@ -387,3 +387,72 @@ func taskSubmissionRelayInfo(billing relaycommon.BillingSettler) *relaycommon.Re
 		ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 1, ChannelType: constant.ChannelTypeTaskPlugin},
 	}
 }
+
+// 提交阶段即失败的任务插入时就是终态，两个退款入口都按状态排除终态任务，
+// 因此它永远不会被轮询重新看到。结算这类任务会产生一笔无法退还的扣费，
+// 对 TensorGrid 钱包还会向控制面投递一条没有对冲的信用事件。
+func TestExecuteTaskSubmissionRefundsImmediateFailureInsteadOfSettling(t *testing.T) {
+	events := make([]string, 0, 3)
+	database := setupTaskSubmissionDatabase(t, true, &events)
+	billing := &taskSubmissionTestBilling{events: &events}
+	c := taskSubmissionTestContext()
+	info := taskSubmissionRelayInfo(billing)
+
+	outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		return &relay.TaskSubmitResult{
+			UpstreamTaskID: "upstream_private",
+			Platform:       constant.TaskPlatform("plugin"),
+			Quota:          500,
+			Immediate: &relaycommon.TaskInfo{
+				Status:   model.TaskStatusFailure,
+				Progress: "100%",
+				Reason:   "upstream rejected the prompt",
+			},
+		}, nil
+	})
+
+	require.Nil(t, taskErr)
+	require.NotNil(t, outcome)
+	assert.NotContains(t, events, "settle", "an immediately failed task must never be settled")
+	assert.Contains(t, events, "refund", "the reservation must be released")
+	assert.Equal(t, 1, billing.refunds)
+
+	// 任务仍然入库供用户查看，但不带任何可再次退款的额度。
+	var stored model.Task
+	require.NoError(t, database.Where("task_id = ?", "task_public").First(&stored).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), stored.Status)
+	assert.Equal(t, "upstream rejected the prompt", stored.FailReason)
+	assert.Zero(t, stored.Quota, "a failed submit must not leave a refundable charge on the task")
+}
+
+// 提交即成功的任务是可计费的，仍然走结算路径而不是退款路径。
+// 这里让结算返回错误以在写消费日志前停下，保持断言只覆盖计费分支本身。
+func TestExecuteTaskSubmissionSettlesImmediateSuccess(t *testing.T) {
+	events := make([]string, 0, 3)
+	database := setupTaskSubmissionDatabase(t, true, &events)
+	billing := &taskSubmissionTestBilling{events: &events, settleErr: errors.New("settle failed")}
+	c := taskSubmissionTestContext()
+	info := taskSubmissionRelayInfo(billing)
+
+	_, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		return &relay.TaskSubmitResult{
+			UpstreamTaskID: "upstream_private",
+			Platform:       constant.TaskPlatform("plugin"),
+			Quota:          500,
+			Immediate: &relaycommon.TaskInfo{
+				Status:   model.TaskStatusSuccess,
+				Progress: "100%",
+			},
+		}, nil
+	})
+
+	require.NotNil(t, taskErr)
+	assert.Equal(t, "task_billing_settlement_failed", taskErr.Code)
+	assert.Contains(t, events, "settle", "an immediately successful task is billable")
+	assert.Equal(t, 0, billing.refunds, "a persisted task must stay durable")
+
+	var stored model.Task
+	require.NoError(t, database.Where("task_id = ?", "task_public").First(&stored).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusSuccess), stored.Status)
+	assert.Equal(t, 500, stored.Quota)
+}
