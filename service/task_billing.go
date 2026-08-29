@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -15,26 +16,31 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// LogTaskConsumption settles the submitted task and records its usage. For a
-// TensorGrid wallet, the settlement receives the same structured details as
-// the user-visible log so its credit event is complete at commit time.
-func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
+// BuildTaskConsumeLogParams 构建任务消费日志参数。调用方构建一次后分别传给
+// SettleBilling 与 LogTaskConsumptionWithParams，使 TensorGrid 钱包的信用事件
+// 与用户可见日志携带完全相同的结构化明细（且只产生一次配额饱和告警）。
+func BuildTaskConsumeLogParams(c *gin.Context, info *relaycommon.RelayInfo, task *model.Task) model.RecordConsumeLogParams {
 	tokenName := c.GetString("token_name")
 	logContent := fmt.Sprintf("操作 %s", info.Action)
 	// 支持任务仅按次计费
 	if common.StringsContains(constant.TaskPricePatches, info.OriginModelName) {
 		logContent = fmt.Sprintf("%s，按次计费", logContent)
 	} else {
+		var contents []string
 		if otherRatios := info.PriceData.OtherRatios(); len(otherRatios) > 0 {
-			var contents []string
 			for key, ra := range otherRatios {
 				if 1.0 != ra {
 					contents = append(contents, fmt.Sprintf("%s: %.2f", key, ra))
 				}
 			}
-			if len(contents) > 0 {
-				logContent = fmt.Sprintf("%s, 计算参数：%s", logContent, strings.Join(contents, ", "))
+		}
+		if snap := info.TieredBillingSnapshot; snap != nil {
+			for key, value := range snap.UsageFacts {
+				contents = append(contents, fmt.Sprintf("%s: %v", key, value))
 			}
+		}
+		if len(contents) > 0 {
+			logContent = fmt.Sprintf("%s, 计算参数：%s", logContent, strings.Join(contents, ", "))
 		}
 	}
 	other := make(map[string]interface{})
@@ -52,8 +58,17 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = info.UpstreamModelName
 	}
+	if snap := info.TieredBillingSnapshot; snap != nil {
+		other["billing_mode"] = "tiered_expr"
+		other["expr_b64"] = base64.StdEncoding.EncodeToString([]byte(snap.ExprString))
+		other["matched_tier"] = snap.EstimatedTier
+		if len(snap.UsageFacts) > 0 {
+			other["usage_facts"] = snap.UsageFacts
+		}
+	}
+	appendTaskLogInfo(task, other)
 	attachQuotaSaturation(c, info, other)
-	consumeParams := model.RecordConsumeLogParams{
+	return model.RecordConsumeLogParams{
 		ChannelId: info.ChannelId,
 		ModelName: info.OriginModelName,
 		TokenName: tokenName,
@@ -63,9 +78,16 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 		Group:     info.UsingGroup,
 		Other:     other,
 	}
-	if err := SettleBilling(c, info, info.PriceData.Quota, consumeParams); err != nil {
-		common.SysError("settle task billing error: " + err.Error())
-	}
+}
+
+// LogTaskConsumption 记录任务消费日志和统计信息（仅记录，不涉及实际扣费）。
+// 实际扣费已由 BillingSession（PreConsumeBilling + SettleTaskBilling）完成。
+func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model.Task) {
+	LogTaskConsumptionWithParams(c, info, BuildTaskConsumeLogParams(c, info, task))
+}
+
+// LogTaskConsumptionWithParams 使用已构建的参数记录任务消费日志和统计信息。
+func LogTaskConsumptionWithParams(c *gin.Context, info *relaycommon.RelayInfo, consumeParams model.RecordConsumeLogParams) {
 	model.RecordConsumeLog(c, info.UserId, consumeParams)
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
 	model.UpdateChannelUsedQuota(info.ChannelId, info.PriceData.Quota)
@@ -154,13 +176,48 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 				other[k] = v
 			}
 		}
+		if snap := bc.TieredSnapshot; snap != nil {
+			other["billing_mode"] = "tiered_expr"
+			other["expr_b64"] = base64.StdEncoding.EncodeToString([]byte(snap.ExprString))
+			other["matched_tier"] = snap.EstimatedTier
+			if len(snap.UsageFacts) > 0 {
+				other["usage_facts"] = snap.UsageFacts
+			}
+		}
 	}
 	props := task.Properties
 	if props.UpstreamModelName != "" && props.UpstreamModelName != props.OriginModelName {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = props.UpstreamModelName
 	}
+	appendTaskLogInfo(task, other)
 	return other
+}
+
+func appendTaskLogInfo(task *model.Task, other map[string]interface{}) {
+	if task == nil || other == nil {
+		return
+	}
+	if task.TaskID != "" {
+		other["task_id"] = task.TaskID
+	}
+	if task.PrivateData.Execution != nil {
+		AppendTaskPluginAuditInfo(other, task.PrivateData.Execution.TaskPlugin)
+	}
+	if task.PrivateData.UpstreamTaskID == "" && task.PrivateData.NodeName == "" {
+		return
+	}
+	rootInfo, ok := other["root_info"].(map[string]interface{})
+	if !ok || rootInfo == nil {
+		rootInfo = map[string]interface{}{}
+		other["root_info"] = rootInfo
+	}
+	if task.PrivateData.UpstreamTaskID != "" {
+		rootInfo["upstream_task_id"] = task.PrivateData.UpstreamTaskID
+	}
+	if task.PrivateData.NodeName != "" {
+		rootInfo["node_name"] = task.PrivateData.NodeName
+	}
 }
 
 func taskBillingContextPriceData(bc *model.TaskBillingContext) *types.PriceData {
@@ -247,7 +304,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 // reason 用于日志记录（例如 "token重算" 或 "adaptor调整"）。
 // clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
 func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason string, clamps ...*common.QuotaClamp) {
-	if actualQuota <= 0 {
+	if actualQuota < 0 {
 		return
 	}
 	preConsumedQuota := task.Quota
@@ -328,9 +385,9 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 // RecalculateTaskQuotaByTokens 根据实际 token 消耗重新计费（异步差额结算）。
 // 当任务成功且返回了 totalTokens 时，根据模型倍率和分组倍率重新计算实际扣费额度，
 // 与预扣费的差额进行补扣或退还。支持钱包和订阅计费来源。
-func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTokens int) {
+func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTokens int) bool {
 	if totalTokens <= 0 {
-		return
+		return false
 	}
 
 	modelName := taskModelName(task)
@@ -339,7 +396,7 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 	modelRatio, hasRatioSetting, _ := ratio_setting.GetModelRatio(modelName)
 	// 只有配置了倍率(非固定价格)时才按 token 重新计费
 	if !hasRatioSetting || modelRatio <= 0 {
-		return
+		return false
 	}
 
 	// 获取用户和组的倍率信息
@@ -351,7 +408,7 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 		}
 	}
 	if group == "" {
-		return
+		return false
 	}
 
 	groupRatio := ratio_setting.GetGroupRatio(group)
@@ -375,4 +432,5 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 
 	reason := fmt.Sprintf("token重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f, otherMultiplier=%.4f", totalTokens, modelRatio, finalGroupRatio, otherMultiplier)
 	RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
+	return true
 }
