@@ -73,7 +73,9 @@ func tensorGridCreditEventValues(account *TensorGridAccount, params RecordConsum
 			return 0, 0, "", "", err
 		}
 	}
-	other := params.Other
+	// Snapshot flattens the log's public scope back to the top level, which is
+	// where every usage key read below is written.
+	other := params.Other.Snapshot()
 	usage := map[string]interface{}{
 		"input_tokens":        params.PromptTokens,
 		"output_tokens":       params.CompletionTokens,
@@ -315,12 +317,15 @@ func SettleTensorGridWalletQuota(userID int, requestID string, actualQuota int, 
 		eventParams := params
 		eventParams.Quota = collectedQuota
 		if eventParams.Other == nil {
-			eventParams.Other = make(map[string]interface{})
+			eventParams.Other = NewLogOther()
 		}
-		eventParams.Other["billed_quota"] = actualQuota
-		eventParams.Other["collected_quota"] = collectedQuota
+		// LogOther is a pointer, so these land on the caller's log too — the same
+		// sharing the map-based version had, and what makes billed vs collected
+		// visible in the consume log.
+		eventParams.Other.SetPublic("billed_quota", actualQuota)
+		eventParams.Other.SetPublic("collected_quota", collectedQuota)
 		if uncollectedQuota := actualQuota - collectedQuota; uncollectedQuota > 0 {
-			eventParams.Other["uncollected_quota"] = uncollectedQuota
+			eventParams.Other.SetPublic("uncollected_quota", uncollectedQuota)
 		}
 		deltaMinor, deltaMicroUSD, usageJSON, pricingVersion, err := tensorGridCreditEventValues(&account, eventParams)
 		if err != nil {
@@ -400,21 +405,22 @@ func AdjustTensorGridWalletQuota(userID int, requestID string, requestedQuotaDel
 			return errors.New("TensorGrid billing adjustment would move the balance outside the supported range")
 		}
 
+		// A detached copy, unlike the settlement path above: these adjustment keys
+		// describe the credit event alone and must not reach the caller's log.
+		// Privileged scopes are dropped on the way, which is what the event wants.
 		eventParams := params
-		eventParams.Other = make(map[string]interface{}, len(params.Other)+4)
-		for key, value := range params.Other {
-			eventParams.Other[key] = value
-		}
-		eventParams.Other["requested_quota_delta"] = requestedQuotaDelta
+		eventParams.Other = NewLogOther()
+		eventParams.Other.MergePublic(params.Other.Snapshot())
+		eventParams.Other.SetPublic("requested_quota_delta", requestedQuotaDelta)
 		magnitude := appliedQuotaDelta
 		if magnitude < 0 {
 			magnitude = -magnitude
-			eventParams.Other["refund_quota"] = magnitude
+			eventParams.Other.SetPublic("refund_quota", magnitude)
 		} else {
-			eventParams.Other["billed_quota"] = requestedQuotaDelta
-			eventParams.Other["collected_quota"] = appliedQuotaDelta
+			eventParams.Other.SetPublic("billed_quota", requestedQuotaDelta)
+			eventParams.Other.SetPublic("collected_quota", appliedQuotaDelta)
 			if uncollectedQuota := requestedQuotaDelta - appliedQuotaDelta; uncollectedQuota > 0 {
-				eventParams.Other["uncollected_quota"] = uncollectedQuota
+				eventParams.Other.SetPublic("uncollected_quota", uncollectedQuota)
 			}
 		}
 		eventParams.Quota = magnitude
@@ -588,11 +594,16 @@ func ReconcileTensorGridCreditEvents(limit int) (replayed, failed int, err error
 		tensorGridReconcileOffset += len(logs)
 	}
 	for _, log := range logs {
-		other, parseErr := common.StrToMap(log.Other)
+		parsed, parseErr := common.StrToMap(log.Other)
 		if parseErr != nil {
 			failed++
 			continue
 		}
+		// Rebuild the stored log's top level as the public scope: every usage key
+		// the credit event reads was written there, and the privileged scopes
+		// SetPublic rejects are not part of the event payload.
+		other := NewLogOther()
+		other.MergePublic(parsed)
 		requestID := log.RequestId
 		if strings.TrimSpace(requestID) == "" {
 			requestID = fmt.Sprintf("log:%d", log.Id)

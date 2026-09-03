@@ -105,10 +105,11 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 		return true
 	}
 
-	other := map[string]interface{}{
-		"task_id": task.MjId,
-		"reason":  reason,
-	}
+	// Built up front rather than at the logging step below: the TensorGrid wallet
+	// adjustment keys its outbox event off these same params.
+	other := model.NewLogOther()
+	other.SetPublic("task_id", task.MjId)
+	other.SetPublic("reason", reason)
 	params := model.RecordConsumeLogParams{
 		ChannelId: task.GetBillingChannelId(), ModelName: CovertMjpActionToModelName(task.Action),
 		Quota: quota, TokenId: task.TokenId, Other: other,
@@ -148,6 +149,7 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 	billingChannelId := task.GetBillingChannelId()
 	model.UpdateUserUsedQuota(task.UserId, -quota)
 	model.UpdateChannelUsedQuota(billingChannelId, -quota)
+	// other 已在退款前构建
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:    task.UserId,
 		LogType:   model.LogTypeRefund,

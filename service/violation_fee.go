@@ -126,7 +126,8 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 	tokenName := ctx.GetString("token_name")
 	oai := apiErr.ToOpenAIError()
 
-	other := map[string]any{
+	other := model.NewLogOther()
+	other.MergePublic(map[string]interface{}{
 		"violation_fee":        true,
 		"violation_fee_code":   string(types.ErrorCodeViolationFeeGrokCSAM),
 		"fee_quota":            feeQuota,
@@ -136,18 +137,20 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 		"upstream_error_type":  oai.Type,
 		"upstream_error_code":  fmt.Sprintf("%v", oai.Code),
 		"violation_fee_marker": CSAMViolationMarker,
-	}
+	})
 	consumeParams := model.RecordConsumeLogParams{
-		ChannelId:        relayInfo.ChannelId,
-		ModelName:        relayInfo.OriginModelName,
-		TokenName:        tokenName,
-		Quota:            feeQuota,
-		Content:          "Violation fee charged",
-		TokenId:          relayInfo.TokenId,
-		UseTimeSeconds:   int(useTimeSeconds),
-		IsStream:         relayInfo.IsStream,
-		Group:            relayInfo.UsingGroup,
-		Other:            other,
+		ChannelId:      relayInfo.ChannelId,
+		ModelName:      relayInfo.OriginModelName,
+		TokenName:      tokenName,
+		Quota:          feeQuota,
+		Content:        "Violation fee charged",
+		TokenId:        relayInfo.TokenId,
+		UseTimeSeconds: int(useTimeSeconds),
+		IsStream:       relayInfo.IsStream,
+		Group:          relayInfo.UsingGroup,
+		Other:          other,
+		// The fee is a second charge against the same request, so it needs its
+		// own billing key or TensorGrid would treat it as a duplicate event.
 		BillingRequestId: relayInfo.RequestId + ":violation",
 	}
 

@@ -413,17 +413,21 @@ func GetTensorGridBalance(subject string) (*TensorGridBalanceSnapshot, error) {
 	return snapshotTensorGridBalance(account, user.Quota)
 }
 
-func EnrichTensorGridLogOther(userId int, other map[string]interface{}) map[string]interface{} {
+// EnrichTensorGridLogOther stamps the user's TensorGrid billing context onto a
+// usage log. It stays in the public scope because tensorGridLogBilling reads it
+// back off the stored log, and the currency and FX rate are the log owner's own
+// billing terms rather than privileged operator metadata.
+func EnrichTensorGridLogOther(userId int, other *LogOther) *LogOther {
+	if other == nil {
+		other = NewLogOther()
+	}
 	var account TensorGridAccount
 	if err := DB.Select("currency", "fx_rate_irt_per_usd").Where("user_id = ?", userId).First(&account).Error; err != nil {
 		return other
 	}
-	if other == nil {
-		other = make(map[string]interface{})
-	}
-	other["tensorgrid_billing"] = map[string]interface{}{
+	other.SetPublic("tensorgrid_billing", map[string]interface{}{
 		"currency": account.Currency, "fx_rate_irt_per_usd": account.FxRateIrtPerUSD,
-	}
+	})
 	return other
 }
 

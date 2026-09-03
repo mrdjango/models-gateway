@@ -81,6 +81,14 @@ func setupTensorGridModelTest(t *testing.T) {
 	})
 }
 
+// publicLogOther builds the log metadata a consume log carries, with every key
+// in the public scope — where the TensorGrid usage meters read them from.
+func publicLogOther(values map[string]interface{}) *LogOther {
+	other := NewLogOther()
+	other.MergePublic(values)
+	return other
+}
+
 func TestTensorGridBalanceAdjustmentIsIdempotent(t *testing.T) {
 	setupTensorGridModelTest(t)
 	const subject = "b359938a-1b18-4a0b-8184-c99990a9ce74"
@@ -322,12 +330,12 @@ func TestTensorGridCreditEventIncludesEveryUsageMeterAndPricingVersion(t *testin
 
 	err = TensorGridCreditEventFromConsume(account.UserId, "meter-request", RecordConsumeLogParams{
 		ModelName: "tiered:model", Quota: 500, PromptTokens: 10, CompletionTokens: 20,
-		Other: map[string]interface{}{
+		Other: publicLogOther(map[string]interface{}{
 			"cache_tokens": 3, "cache_write_tokens": 4,
 			"image_input_tokens": 5, "image_output_tokens": 6,
 			"audio_input_tokens": 7, "audio_output_tokens": 8,
 			"billing_mode": "tiered_expr", "expr_b64": "ZXhwcg==", "matched_tier": "base",
-		},
+		}),
 	})
 	require.NoError(t, err)
 
@@ -362,7 +370,7 @@ func TestTensorGridWalletSettlementCommitsBalanceAndOutboxExactlyOnce(t *testing
 
 	params := RecordConsumeLogParams{
 		ModelName: "atomic-model", PromptTokens: 11, CompletionTokens: 7,
-		Other: map[string]interface{}{"cache_tokens": 3, "cache_write_tokens": 2},
+		Other: publicLogOther(map[string]interface{}{"cache_tokens": 3, "cache_write_tokens": 2}),
 	}
 	handled, err = SettleTensorGridWalletQuota(account.UserId, requestID, 250_000, params)
 	require.NoError(t, err)
@@ -483,7 +491,7 @@ func TestTensorGridWalletAdjustmentIsAtomicIdempotentAndNeverNegative(t *testing
 
 	handled, applied, err := AdjustTensorGridWalletQuota(
 		account.UserId, chargeRequestID, 1_200_000,
-		RecordConsumeLogParams{ModelName: "task-model", Other: map[string]interface{}{"cache_tokens": 11}},
+		RecordConsumeLogParams{ModelName: "task-model", Other: publicLogOther(map[string]interface{}{"cache_tokens": 11})},
 	)
 	require.NoError(t, err)
 	assert.True(t, handled)

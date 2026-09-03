@@ -9,7 +9,7 @@ export const meta = {
     en: "SunoAPI project music and lyrics generation",
     zh: "SunoAPI 项目 音乐与歌词生成",
   },
-  version: "1.0.0",
+  version: "1.0.1",
   author: { name: "QuantumNous" },
   channelTypes: [36],
   models: ["suno_music", "suno_lyrics"],
@@ -128,24 +128,28 @@ export function parseSubmitResponse(ctx, resp) {
 
 export function extractUsage(ctx) {
   if (ctx.usagePurpose === "billing_ratios") return null;
-  const model = trimmed(ctx.model || (ctx.requestBody || {}).model).toLowerCase();
+  const model = trimmed(ctx.upstreamModel || ctx.model || (ctx.requestBody || {}).model).toLowerCase();
   const action = actionName(ctx).toLowerCase() || (model === "suno_lyrics" ? "lyrics" : "music");
   return { clips: action === "lyrics" ? 1 : 2, action: action };
 }
 
-export function buildBatchQueryRequest(ctx, taskIds) {
+export function buildBatchQueryRequest(ctx, tasks) {
   return {
     url: ctx.baseUrl + "/suno/fetch",
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + ctx.apiKey },
-    body: { ids: taskIds },
+    body: {
+      ids: (tasks || []).map(function (task) {
+        return task.taskId;
+      }),
+    },
   };
 }
 
 // Required v1 per-task hooks remain defined for contract compatibility. Suno's
 // host polling path uses the batch hooks below.
 export function buildQueryRequest(ctx) {
-  return buildBatchQueryRequest(ctx, (ctx.requestBody || {}).ids || []);
+  return buildBatchQueryRequest(ctx, [ctx]);
 }
 
 export function parseBatchResult(ctx, body) {
