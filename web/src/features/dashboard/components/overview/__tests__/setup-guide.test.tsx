@@ -231,9 +231,16 @@ describe('overview setup guide', () => {
     keyLookupError = new Error('Key lookup unavailable')
     await renderOverview()
 
-    expect(
-      await screen.findByRole('button', { name: 'Hide setup guide' })
-    ).toBeVisible()
+    // Re-query on every poll instead of holding the node findBy returned: the
+    // guide subtree can be remounted while the remaining overview queries
+    // settle, which detaches an element captured earlier and fails toBeVisible
+    // even though the guide is on screen. A guide that never expands still
+    // fails here, so the assertion keeps its meaning.
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Hide setup guide' })
+      ).toBeVisible()
+    })
     expect(
       screen.queryByRole('button', { name: 'Setup guide' })
     ).not.toBeInTheDocument()
