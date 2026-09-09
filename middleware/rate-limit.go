@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -140,8 +141,14 @@ func writeRateLimited(c *gin.Context, retryAfterSeconds int64) {
 	if retryAfterSeconds > 0 {
 		c.Header("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
 	}
-	c.Status(http.StatusTooManyRequests)
-	c.Abort()
+	// Carry the standard error envelope. An empty body left API clients unable to
+	// tell backpressure apart from a malformed reply, so they reported it as an
+	// upstream fault and retried instead of backing off.
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+		"success": false,
+		"code":    "rate_limit_exceeded",
+		"message": "Too many requests. Retry after the interval in the Retry-After header.",
+	})
 }
 
 func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
@@ -164,11 +171,38 @@ func GlobalWebRateLimit() func(c *gin.Context) {
 	return defNext
 }
 
+// internalServiceRoutePrefix is the first-party TensorGrid integration surface.
+// Every request under it is HMAC-signed against a shared secret with a bounded
+// timestamp window (see TensorGridServiceAuth), so it is a trusted caller
+// rather than anonymous traffic.
+const internalServiceRoutePrefix = "/api/internal/tensorgrid/v1"
+
+// isInternalServiceRoute reports whether the request targets that surface.
+//
+// The check is by path because the global limiter is installed on the whole
+// /api group and therefore runs before the route-level signature check that
+// would otherwise mark the caller as trusted.
+func isInternalServiceRoute(c *gin.Context) bool {
+	return strings.HasPrefix(c.Request.URL.Path, internalServiceRoutePrefix)
+}
+
 func GlobalAPIRateLimit() func(c *gin.Context) {
-	if common.GlobalApiRateLimitEnable {
-		return rateLimitFactory(common.GlobalApiRateLimitNum, common.GlobalApiRateLimitDuration, "GA")
+	if !common.GlobalApiRateLimitEnable {
+		return defNext
 	}
-	return defNext
+	limit := rateLimitFactory(common.GlobalApiRateLimitNum, common.GlobalApiRateLimitDuration, "GA")
+	return func(c *gin.Context) {
+		// The limiter keys on client IP, which is meaningless for the internal
+		// integration: every TensorGrid backend request arrives from a single
+		// container address, so one shared bucket throttled the entire platform's
+		// server-to-server traffic and surfaced to end users as 5xx. Server-side
+		// callers are bounded by the signing secret, not by an anonymous quota.
+		if isInternalServiceRoute(c) {
+			c.Next()
+			return
+		}
+		limit(c)
+	}
 }
 
 func CriticalRateLimit() func(c *gin.Context) {

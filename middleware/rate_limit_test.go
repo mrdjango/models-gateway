@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -222,4 +223,74 @@ func TestRedisFailurePolicies(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, userResponse.Code)
 	assert.Empty(t, userResponse.Body.String())
 	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/email", "192.0.2.62:12345").Code)
+}
+
+// The internal TensorGrid surface is HMAC-signed server-to-server traffic that
+// all arrives from one container address. Sharing an IP-keyed bucket with
+// anonymous callers throttled the entire platform at once, which reached end
+// users as 5xx, so it must be exempt.
+func TestGlobalAPIRateLimitExemptsTheInternalIntegration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	useRateLimitMiniRedis(t)
+
+	previousEnable := common.GlobalApiRateLimitEnable
+	previousNum := common.GlobalApiRateLimitNum
+	previousDuration := common.GlobalApiRateLimitDuration
+	common.GlobalApiRateLimitEnable = true
+	common.GlobalApiRateLimitNum = 2
+	common.GlobalApiRateLimitDuration = 60
+	t.Cleanup(func() {
+		common.GlobalApiRateLimitEnable = previousEnable
+		common.GlobalApiRateLimitNum = previousNum
+		common.GlobalApiRateLimitDuration = previousDuration
+	})
+
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	apiRouter := router.Group("/api")
+	apiRouter.Use(GlobalAPIRateLimit())
+	handler := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	apiRouter.GET("/public", handler)
+	apiRouter.GET("/internal/tensorgrid/v1/users/:subject", handler)
+
+	remoteAddr := "192.0.2.20:12345"
+	internalPath := "/api/internal/tensorgrid/v1/users/abc"
+
+	// Well past the configured limit of 2.
+	for i := 0; i < 10; i++ {
+		recorder := performRateLimitRequest(router, internalPath, remoteAddr)
+		require.Equal(t, http.StatusNoContent, recorder.Code, "internal request %d was throttled", i)
+	}
+
+	// The same client IP is still limited on every other API route, and the
+	// internal traffic above must not have consumed that budget.
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/api/public", remoteAddr).Code)
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/api/public", remoteAddr).Code)
+	assert.Equal(t, http.StatusTooManyRequests, performRateLimitRequest(router, "/api/public", remoteAddr).Code)
+}
+
+func TestRateLimitedResponseCarriesAnErrorEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	useRateLimitMiniRedis(t)
+
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	router.GET("/limited", rateLimitFactory(1, 37, "ENVELOPE"), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	remoteAddr := "192.0.2.30:12345"
+	require.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/limited", remoteAddr).Code)
+
+	recorder := performRateLimitRequest(router, "/limited", remoteAddr)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	assert.NotEmpty(t, recorder.Header().Get("Retry-After"))
+
+	var body struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+	assert.False(t, body.Success)
+	assert.Equal(t, "rate_limit_exceeded", body.Code)
 }
