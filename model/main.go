@@ -330,6 +330,9 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	if err := migrateOptionPrimaryKey(DB); err != nil {
+		common.SysError("failed to migrate options primary key: " + err.Error())
+	}
 	// Widen tensorgrid_credit_outboxes identifier columns before AutoMigrate re-reads them
 	if err := migrateTensorGridCreditOutboxIdentifierWidth(); err != nil {
 		return err
@@ -396,115 +399,6 @@ func migrateDB() error {
 			return err
 		}
 	}
-	return nil
-}
-
-func migrateDBFast() error {
-
-	// Schema fixes that AutoMigrate cannot perform must run first, serially, and
-	// in the same order as migrateDB(); otherwise this path silently skips them.
-	// Keep this prologue and the model list below in sync with migrateDB().
-	if err := migrateTokenKeyUniqueness(DB); err != nil {
-		return err
-	}
-	if err := migratePrefillGroupUniqueness(DB); err != nil {
-		return err
-	}
-	migrateSubscriptionPlanPriceAmount()
-	if err := migrateTokenModelLimitsToText(); err != nil {
-		return err
-	}
-	if err := migrateTensorGridCreditOutboxIdentifierWidth(); err != nil {
-		return err
-	}
-
-	var wg sync.WaitGroup
-
-	migrations := []struct {
-		model interface{}
-		name  string
-	}{
-		{&Channel{}, "Channel"},
-		{&Token{}, "Token"},
-		{&User{}, "User"},
-		{&UserSession{}, "UserSession"},
-		{&AuthFlow{}, "AuthFlow"},
-		{&ExternalIdentityClaim{}, "ExternalIdentityClaim"},
-		{&TensorGridAccount{}, "TensorGridAccount"},
-		{&TensorGridCreditOutbox{}, "TensorGridCreditOutbox"},
-		{&TensorGridBillingSettlement{}, "TensorGridBillingSettlement"},
-		{&TensorGridBillingAdjustment{}, "TensorGridBillingAdjustment"},
-		{&TensorGridBalanceMutation{}, "TensorGridBalanceMutation"},
-		{&TensorGridTokenCreation{}, "TensorGridTokenCreation"},
-		{&PasskeyCredential{}, "PasskeyCredential"},
-		{&Option{}, "Option"},
-		{&LoginEncryptionKey{}, "LoginEncryptionKey"},
-		{&Redemption{}, "Redemption"},
-		{&Ability{}, "Ability"},
-		{&Log{}, "Log"},
-		{&Midjourney{}, "Midjourney"},
-		{&TopUp{}, "TopUp"},
-		{&QuotaData{}, "QuotaData"},
-		{&Task{}, "Task"},
-		{&TaskPlugin{}, "TaskPlugin"},
-		{&Model{}, "Model"},
-		{&Vendor{}, "Vendor"},
-		{&PrefillGroup{}, "PrefillGroup"},
-		{&Setup{}, "Setup"},
-		{&TwoFA{}, "TwoFA"},
-		{&TwoFABackupCode{}, "TwoFABackupCode"},
-		{&Checkin{}, "Checkin"},
-		{&SubscriptionOrder{}, "SubscriptionOrder"},
-		{&UserSubscription{}, "UserSubscription"},
-		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
-		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
-		{&UserOAuthBinding{}, "UserOAuthBinding"},
-		{&PerfMetric{}, "PerfMetric"},
-		{&SystemInstance{}, "SystemInstance"},
-		{&SystemTask{}, "SystemTask"},
-		{&SystemTaskLock{}, "SystemTaskLock"},
-		{&CasbinRule{}, "CasbinRule"},
-		{&AuthzRole{}, "AuthzRole"},
-	}
-	// 动态计算migration数量，确保errChan缓冲区足够大
-	errChan := make(chan error, len(migrations))
-
-	for _, m := range migrations {
-		wg.Add(1)
-		go func(model interface{}, name string) {
-			defer wg.Done()
-			if err := DB.AutoMigrate(model); err != nil {
-				errChan <- fmt.Errorf("failed to migrate %s: %v", name, err)
-			}
-		}(m.model, m.name)
-	}
-
-	// Wait for all migrations to complete
-	wg.Wait()
-	close(errChan)
-
-	// Check for any errors
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
-	if err := InitializeUserAuthVersions(); err != nil {
-		return err
-	}
-	if err := InitializeExternalIdentityClaims(); err != nil {
-		return err
-	}
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
-		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
-			return err
-		}
-	} else {
-		if err := DB.AutoMigrate(&SubscriptionPlan{}); err != nil {
-			return err
-		}
-	}
-	common.SysLog("database migrated")
 	return nil
 }
 

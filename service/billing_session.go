@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/bytedance/gopkg/util/gopool"
@@ -47,7 +48,10 @@ func (s *BillingSession) Settle(actualQuota int) error {
 func (s *BillingSession) settle(actualQuota int, consumeParams model.RecordConsumeLogParams) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.settled {
+	// A refunded session already returned its whole reservation. Settling it
+	// again would credit the pre-consume a second time, e.g. when a task that
+	// failed at submission is refunded and a caller later settles it at zero.
+	if s.settled || s.refunded {
 		return nil
 	}
 	delta := actualQuota - s.preConsumedQuota
@@ -176,7 +180,12 @@ func (s *BillingSession) Reserve(targetQuota int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.settled || s.refunded || s.trusted || targetQuota <= s.preConsumedQuota {
+	imageRequest := false
+	if s.relayInfo != nil {
+		_, imageRequest = s.relayInfo.Request.(*dto.ImageRequest)
+		imageRequest = imageRequest || s.relayInfo.ImageRequestCount > 0
+	}
+	if s.settled || s.refunded || s.trusted && !imageRequest || targetQuota <= s.preConsumedQuota {
 		return nil
 	}
 
@@ -185,7 +194,7 @@ func (s *BillingSession) Reserve(targetQuota int) error {
 		return nil
 	}
 
-	if err := s.reserveFunding(delta); err != nil {
+	if err := s.reserveFunding(delta, imageRequest); err != nil {
 		return err
 	}
 	if err := s.reserveToken(delta); err != nil {
@@ -198,6 +207,9 @@ func (s *BillingSession) Reserve(targetQuota int) error {
 		s.tokenConsumed += delta
 	}
 	s.extraReserved += delta
+	if imageRequest {
+		s.trusted = false
+	}
 	s.syncRelayInfo()
 	return nil
 }
@@ -266,10 +278,13 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 	return nil
 }
 
-func (s *BillingSession) reserveFunding(delta int) error {
+func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) error {
 	switch funding := s.funding.(type) {
 	case *WalletFunding:
 		if funding.tensorGrid {
+			// TensorGrid reservations are keyed by request and take an absolute
+			// target. The wallet never admits debt, so image and non-image
+			// requests alike must fit the available balance.
 			targetQuota := funding.consumed + delta
 			handled, reserved, err := model.ReserveTensorGridWalletQuota(
 				funding.userId, funding.requestId, targetQuota,
@@ -284,6 +299,17 @@ func (s *BillingSession) reserveFunding(delta int) error {
 				return types.NewError(ErrInsufficientWalletQuota, types.ErrorCodeInsufficientUserQuota, types.ErrOptionWithSkipRetry())
 			}
 			funding.consumed = targetQuota
+			return nil
+		}
+		if requireAvailableQuota {
+			// Image quantity is known before submission, including retries and
+			// overrides. Reserve atomically instead of admitting wallet debt.
+			if err := funding.PreConsume(delta); err != nil {
+				if errors.Is(err, ErrInsufficientWalletQuota) {
+					return types.NewErrorWithStatusCode(err, types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+				}
+				return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+			}
 			return nil
 		}
 		// 与结算补扣（SettleBilling 正差额 → WalletFunding.Settle）语义一致：

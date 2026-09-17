@@ -346,11 +346,12 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	otherStr := EnrichTensorGridLogOther(userId, params.Other).JSONString()
-	// 判断是否需要记录 IP
+	// 判断是否需要记录 IP。仅在写入用户日志时才需要；日志关闭时本函数仍要
+	// 投递 TensorGrid 信用事件，但不应为此读取用户设置。
 	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
+	if common.LogConsumeEnabled {
+		if settingMap, err := GetUserSetting(userId, false); err == nil {
+			needRecordIp = settingMap.RecordIpLog
 		}
 	}
 	log := &Log{
