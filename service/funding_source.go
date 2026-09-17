@@ -64,7 +64,10 @@ func (w *WalletFunding) PreConsume(amount int) error {
 	if !reserved {
 		return ErrInsufficientWalletQuota
 	}
-	w.consumed = amount
+	// Accumulate: BillingSession.reserveFunding calls PreConsume again with the
+	// increment for image requests, and Refund returns exactly consumed.
+	// Assigning here dropped the earlier pre-consume from the refund.
+	w.consumed += amount
 	return nil
 }
 
