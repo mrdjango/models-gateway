@@ -65,6 +65,11 @@ export function TagBatchEditDialog({
   const [modelMapping, setModelMapping] = useState('')
   const [groups, setGroups] = useState<string[]>([])
 
+  // Read-only summary of what the tag's channels currently have, fetched
+  // alongside the form but never used to pre-fill `models` (see loadTagData).
+  const [currentModels, setCurrentModels] = useState<string[]>([])
+  const [currentChannelCount, setCurrentChannelCount] = useState(0)
+
   // Fetch available groups
   const { data: groupsData, isLoading: isLoadingGroups } = useQuery({
     queryKey: ['groups'],
@@ -93,12 +98,18 @@ export function TagBatchEditDialog({
 
     setIsLoading(true)
     try {
-      // Fetch current tag models
+      // Fetch a read-only summary of the tag's current channels/models.
+      // Channels are normally split one model per channel now, so this is
+      // never used to pre-fill `models`: doing so would make an unrelated
+      // save (e.g. renaming the tag) silently overwrite every channel in
+      // the tag with a single arbitrary model. Admins who want to build on
+      // the current set use the "Start from current models" button.
       const tagModelsResponse = await getTagModels(currentTag)
       requireServerSuccess(tagModelsResponse)
-      if (tagModelsResponse.success && tagModelsResponse.data) {
-        setModels(tagModelsResponse.data)
-      }
+      setCurrentModels(
+        tagModelsResponse.data?.split(',').filter(Boolean) || []
+      )
+      setCurrentChannelCount(tagModelsResponse.channel_count ?? 0)
 
       // Fetch all available models (for future use if needed)
       const allModelsResponse = requireServerSuccess(await getAllModels())
@@ -173,11 +184,17 @@ export function TagBatchEditDialog({
     }
   }
 
+  const handleUseCurrentModels = () => {
+    setModels(currentModels.join(','))
+  }
+
   const handleClose = () => {
     setNewTag('')
     setModels('')
     setModelMapping('')
     setGroups([])
+    setCurrentModels([])
+    setCurrentChannelCount(0)
     onOpenChange(false)
   }
 
@@ -245,7 +262,20 @@ export function TagBatchEditDialog({
 
           {/* Models */}
           <div className='space-y-2'>
-            <Label htmlFor='models'>{t('Models')}</Label>
+            <div className='flex items-center justify-between gap-2'>
+              <Label htmlFor='models'>{t('Models')}</Label>
+              {currentModels.length > 0 && (
+                <Button
+                  type='button'
+                  variant='ghost'
+                  size='xs'
+                  onClick={handleUseCurrentModels}
+                  disabled={isSaving}
+                >
+                  {t('Start from current models')}
+                </Button>
+              )}
+            </div>
             <Textarea
               id='models'
               placeholder={t(
@@ -257,8 +287,20 @@ export function TagBatchEditDialog({
               rows={3}
             />
             <p className='text-muted-foreground text-xs'>
+              {currentChannelCount > 0
+                ? t('{{count}} channel(s) currently share this tag', {
+                    count: currentChannelCount,
+                  })
+                : t('No channels currently share this tag')}
+            </p>
+            {currentModels.length > 0 && (
+              <p className='text-muted-foreground text-xs'>
+                {currentModels.join(', ')}
+              </p>
+            )}
+            <p className='text-muted-foreground text-xs'>
               {t(
-                'Current models for the longest channel in this tag. May not include all models from all channels.'
+                'Entering any value here replaces the models for every channel in this tag.'
               )}
             </p>
           </div>
