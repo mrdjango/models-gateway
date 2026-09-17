@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1492,6 +1493,11 @@ func BatchSetChannelTag(c *gin.Context) {
 	return
 }
 
+// GetTagModels reports how many channels share tag and the union of the
+// distinct models configured across them. Channels are normally split one
+// model per channel, so there is no single channel whose model list can
+// stand in for "the tag's models" — callers MUST NOT treat data as a
+// baseline to silently resend as a models override (see EditChannelByTag).
 func GetTagModels(c *gin.Context) {
 	tag := c.Query("tag")
 	if tag == "" {
@@ -1511,24 +1517,29 @@ func GetTagModels(c *gin.Context) {
 		return
 	}
 
-	var longestModels string
-	maxLength := 0
-
-	// Find the longest models string among all channels with the given tag
+	distinctModels := make(map[string]struct{})
 	for _, channel := range channels {
-		if channel.Models != "" {
-			currentModels := strings.Split(channel.Models, ",")
-			if len(currentModels) > maxLength {
-				maxLength = len(currentModels)
-				longestModels = channel.Models
+		if channel.Models == "" {
+			continue
+		}
+		for m := range strings.SplitSeq(channel.Models, ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				distinctModels[m] = struct{}{}
 			}
 		}
 	}
 
+	models := make([]string, 0, len(distinctModels))
+	for m := range distinctModels {
+		models = append(models, m)
+	}
+	slices.Sort(models)
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    longestModels,
+		"success":       true,
+		"message":       "",
+		"data":          strings.Join(models, ","),
+		"channel_count": len(channels),
 	})
 	return
 }

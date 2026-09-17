@@ -557,11 +557,18 @@ export async function editTagChannels(
 }
 
 /**
- * Get models for a specific tag
+ * Get a read-only summary of models for a specific tag: how many channels
+ * share the tag and the union of their distinct models (comma-separated).
+ * Channels are normally split one model per channel, so this is NOT "the"
+ * current models for the tag — do not resend `data` as a `models` override
+ * without the user explicitly choosing to.
  */
-export async function getTagModels(
-  tag: string
-): Promise<{ success: boolean; message?: string; data?: string }> {
+export async function getTagModels(tag: string): Promise<{
+  success: boolean
+  message?: string
+  data?: string
+  channel_count?: number
+}> {
   const res = await api.get('/api/channel/tag/models', { params: { tag } })
   return res.data
 }

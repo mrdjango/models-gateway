@@ -25,7 +25,7 @@ import { toast } from 'sonner'
 import { Dialog } from '@/components/dialog'
 import { GroupBadge } from '@/components/group-badge'
 import { JsonCodeEditor } from '@/components/json-code-editor'
-import { StatusBadge } from '@/components/status-badge'
+import { StatusBadge, StatusBadgeList } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
 import { Input } from '@/components/ui/input'
@@ -90,24 +90,24 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
   const availableModels =
     allModelsData?.data?.map((m) => m.id).filter(Boolean) || []
   const availableGroups = groupsData?.data || []
+  const currentModels = tagModelsData?.data?.split(',').filter(Boolean) || []
+  const currentChannelCount = tagModelsData?.channel_count ?? 0
 
-  // Initialize form when tag changes
+  // Reset form when the dialog opens for a tag. The models field starts
+  // empty rather than pre-filled: channels are normally split one model per
+  // channel now, so there is no single "current models" value, and silently
+  // resubmitting one would overwrite every channel in the tag on save (see
+  // handleSubmit). Admins who want to build on what's already there use the
+  // "Start from current models" button below, an explicit opt-in action.
   useEffect(() => {
     if (open && currentTag) {
       setNewTag(currentTag)
       setModelMapping('')
+      setSelectedModels([])
       setSelectedGroups([])
       setCustomModel('')
-
-      // Load tag models
-      if (tagModelsData?.data) {
-        const models = tagModelsData.data.split(',').filter(Boolean)
-        setSelectedModels(models)
-      } else {
-        setSelectedModels([])
-      }
     }
-  }, [open, currentTag, tagModelsData])
+  }, [open, currentTag])
 
   const handleAddCustomModel = () => {
     if (!customModel.trim()) return
@@ -131,6 +131,10 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
 
   const handleRemoveModel = (model: string) => {
     setSelectedModels(selectedModels.filter((m) => m !== model))
+  }
+
+  const handleUseCurrentModels = () => {
+    setSelectedModels(currentModels)
   }
 
   const handleToggleGroup = (group: string) => {
@@ -278,6 +282,43 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
               </div>
             ) : (
               <>
+                <div className='bg-muted/30 space-y-1.5 rounded-md border border-dashed p-3'>
+                  <div className='flex items-center justify-between gap-2'>
+                    <span className='text-muted-foreground text-xs'>
+                      {currentChannelCount > 0
+                        ? t('{{count}} channel(s) currently share this tag', {
+                            count: currentChannelCount,
+                          })
+                        : t('No channels currently share this tag')}
+                    </span>
+                    {currentModels.length > 0 && (
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='xs'
+                        onClick={handleUseCurrentModels}
+                      >
+                        {t('Start from current models')}
+                      </Button>
+                    )}
+                  </div>
+                  {currentModels.length > 0 && (
+                    <StatusBadgeList
+                      items={currentModels}
+                      max={8}
+                      renderItem={(model) => (
+                        <StatusBadge
+                          variant='neutral'
+                          size='sm'
+                          copyable={false}
+                        >
+                          {model}
+                        </StatusBadge>
+                      )}
+                    />
+                  )}
+                </div>
+
                 <div className='flex min-h-[60px] flex-wrap gap-2 rounded-md border p-3'>
                   {selectedModels.length > 0 ? (
                     selectedModels.map((model) => (

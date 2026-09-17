@@ -847,6 +847,14 @@ func DisableChannelByTag(tag string) error {
 	return err
 }
 
+// EditChannelByTag batch-updates every channel sharing tag. When models or
+// group is non-nil and non-empty, that single value REPLACES the field on
+// every channel in the tag (not just the ones the caller meant to change)
+// and their abilities are rebuilt from it. Since channels are normally split
+// one model per channel, passing a non-empty models here as a side effect of
+// an unrelated edit (e.g. a tag rename) silently collapses every channel in
+// the tag onto one model. Callers MUST omit models/group entirely unless the
+// operator explicitly intended a tag-wide overwrite of that field.
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
 	updateData := Channel{}
 	shouldReCreateAbilities := false
