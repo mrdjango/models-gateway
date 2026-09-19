@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -783,11 +784,18 @@ func CreateTensorGridToken(subject, idempotencyKey, name string, expiresAt int64
 		if err != nil {
 			return err
 		}
+		// Route through the configured auto groups when this deployment offers
+		// them, so a failing default group can fall back to a priced fallback
+		// group; otherwise keep the plain default group.
+		group, crossGroupRetry := "default", false
+		if _, ok := setting.GetUserUsableGroupsCopy()["auto"]; ok && len(setting.GetAutoGroups()) > 0 {
+			group, crossGroupRetry = "auto", true
+		}
 		now := common.GetTimestamp()
 		token = Token{
 			UserId: account.UserId, Name: name, Key: key, Status: common.TokenStatusEnabled,
 			CreatedTime: now, AccessedTime: now, ExpiredTime: expiresAt,
-			UnlimitedQuota: true, Group: "default",
+			UnlimitedQuota: true, Group: group, CrossGroupRetry: crossGroupRetry,
 		}
 		if err := tx.Create(&token).Error; err != nil {
 			return err
