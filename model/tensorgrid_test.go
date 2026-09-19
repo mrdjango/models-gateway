@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/glebarez/sqlite"
@@ -295,6 +296,32 @@ func TestTensorGridTokenCreationIsAccountScopedAndIdempotent(t *testing.T) {
 
 	_, _, err = CreateTensorGridToken(subject, "token:00000001", "Different", 0)
 	assert.ErrorIs(t, err, ErrTensorGridIdempotencyConflict)
+}
+
+func TestTensorGridTokenCreationUsesAutoGroupWhenOffered(t *testing.T) {
+	setupTensorGridModelTest(t)
+	previousUsable := setting.UserUsableGroups2JSONString()
+	previousAuto := setting.AutoGroups2JsonString()
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsable))
+		require.NoError(t, setting.UpdateAutoGroupsByJsonString(previousAuto))
+	})
+	const subject = "5c1f7e0a-2b8d-4f39-9a64-3e0d7c2b91aa"
+	_, err := UpsertTensorGridAccount(subject, "auto@example.com", "Auto", "USD", "", true, 1)
+	require.NoError(t, err)
+
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":""}`))
+	require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["default","fallback"]`))
+	plain, _, err := CreateTensorGridToken(subject, "token:plain001", "Plain", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "default", plain.Group)
+	assert.False(t, plain.CrossGroupRetry)
+
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"","auto":"Auto"}`))
+	routed, _, err := CreateTensorGridToken(subject, "token:auto0001", "Routed", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "auto", routed.Group)
+	assert.True(t, routed.CrossGroupRetry)
 }
 
 func TestTensorGridCreditEventReplayIsIdempotent(t *testing.T) {
