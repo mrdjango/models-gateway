@@ -451,7 +451,11 @@ type Message struct {
 	Tools json.RawMessage `json:"tools,omitempty"`
 	// Annotations is an official Chat response field. Keeping it on the shared
 	// message type also preserves annotations when clients replay assistant output.
-	Annotations   json.RawMessage `json:"annotations,omitempty"`
+	Annotations json.RawMessage `json:"annotations,omitempty"`
+	// Images carries generated picture output returned alongside the text content
+	// by OpenAI-compatible providers such as OpenRouter. Without it the image is
+	// dropped while the request is still billed for its output tokens.
+	Images        json.RawMessage `json:"images,omitempty"`
 	parsedContent []MediaContent
 	//parsedStringContent *string
 }
@@ -566,6 +570,13 @@ func (m *MediaContent) ToFileSource() types.FileSource {
 	return nil
 }
 
+// MessageImageOutput is one entry of the assistant message "images" array used
+// by OpenAI-compatible providers to return generated pictures.
+type MessageImageOutput struct {
+	Type     string           `json:"type,omitempty"`
+	ImageUrl *MessageImageUrl `json:"image_url,omitempty"`
+}
+
 type MessageImageUrl struct {
 	Url      string `json:"url"`
 	Detail   string `json:"detail,omitempty"`
@@ -630,6 +641,19 @@ func (m *Message) ParseToolCalls() []ToolCallRequest {
 		return toolCalls
 	}
 	return toolCalls
+}
+
+// ParseImages returns the generated image output an OpenAI-compatible provider
+// attached to this message, or nil when the message carries none.
+func (m *Message) ParseImages() []MessageImageOutput {
+	if len(m.Images) == 0 {
+		return nil
+	}
+	var images []MessageImageOutput
+	if err := kitutil.Unmarshal(m.Images, &images); err != nil {
+		return nil
+	}
+	return images
 }
 
 func (m *Message) SetToolCalls(toolCalls any) {

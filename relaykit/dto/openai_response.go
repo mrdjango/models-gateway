@@ -96,6 +96,21 @@ type ChatCompletionsStreamResponseChoiceDelta struct {
 	// providers such as OpenRouter. Relaykit uses it to preserve streaming URL
 	// citations, including Claude round-trip metadata.
 	Annotations json.RawMessage `json:"annotations,omitempty"`
+	// Images mirrors Message.Images for streaming deltas: providers such as
+	// OpenRouter emit generated pictures on the delta that carries them.
+	Images json.RawMessage `json:"images,omitempty"`
+}
+
+// ParseImages returns the generated image output carried by this delta, or nil.
+func (c *ChatCompletionsStreamResponseChoiceDelta) ParseImages() []MessageImageOutput {
+	if c == nil || len(c.Images) == 0 {
+		return nil
+	}
+	var images []MessageImageOutput
+	if err := kitutil.Unmarshal(c.Images, &images); err != nil {
+		return nil
+	}
+	return images
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) SetContentString(s string) {
