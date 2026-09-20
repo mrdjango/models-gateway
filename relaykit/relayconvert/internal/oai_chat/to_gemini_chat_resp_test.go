@@ -110,3 +110,69 @@ func TestStreamResponseOpenAI2GeminiMapsToolCallFinishReasonAndUsage(t *testing.
 func geminiRespPtr[T any](value T) *T {
 	return &value
 }
+
+func TestResponseOpenAI2GeminiKeepsGeneratedImages(t *testing.T) {
+	msg := dto.Message{Role: "assistant", Content: nil}
+	msg.Images = []byte(`[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}},` +
+		`{"type":"image_url","image_url":{"url":"https://cdn.example/generated.jpg"}}]`)
+
+	resp := ResponseOpenAI2Gemini(&dto.OpenAITextResponse{
+		Model:   "gemini-image-test",
+		Choices: []dto.OpenAITextResponseChoice{{Index: 0, Message: msg, FinishReason: "stop"}},
+	}, &convmeta.Values{})
+
+	require.NotNil(t, resp)
+	require.Len(t, resp.Candidates, 1)
+	parts := resp.Candidates[0].Content.Parts
+	require.Len(t, parts, 2)
+
+	require.NotNil(t, parts[0].InlineData)
+	assert.Equal(t, "image/png", parts[0].InlineData.MimeType)
+	assert.Equal(t, "iVBORw0KGgo=", parts[0].InlineData.Data)
+
+	require.NotNil(t, parts[1].FileData)
+	assert.Equal(t, "image/png", parts[1].FileData.MimeType, "remote URLs carry no mime type over the wire, so the default applies")
+	assert.Equal(t, "https://cdn.example/generated.jpg", parts[1].FileData.FileUri)
+}
+
+func TestChatToGeminiStreamStateKeepsGeneratedImages(t *testing.T) {
+	state := NewChatToGeminiStreamState()
+	finish := "stop"
+	delta := dto.ChatCompletionsStreamResponseChoiceDelta{Role: "assistant"}
+	delta.Images = []byte(`[{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}}]`)
+
+	responses, err := state.ConvertChunk(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, Delta: delta, FinishReason: &finish},
+		},
+	}, &convmeta.Values{})
+	require.NoError(t, err)
+	require.NotEmpty(t, responses)
+
+	var inline *dto.GeminiInlineData
+	for _, response := range responses {
+		for _, candidate := range response.Candidates {
+			for _, part := range candidate.Content.Parts {
+				if part.InlineData != nil {
+					inline = part.InlineData
+				}
+			}
+		}
+	}
+	require.NotNil(t, inline, "streamed image must reach the Gemini client")
+	assert.Equal(t, "image/png", inline.MimeType)
+	assert.Equal(t, "QUJD", inline.Data)
+}
+
+func TestGeminiImagePartsSkipsUnusableEntries(t *testing.T) {
+	parts := geminiImageParts([]dto.MessageImageOutput{
+		{Type: "image_url"},
+		{Type: "image_url", ImageUrl: &dto.MessageImageUrl{Url: "   "}},
+		{Type: "image_url", ImageUrl: &dto.MessageImageUrl{Url: "data:image/png;base64,"}},
+		{Type: "image_url", ImageUrl: &dto.MessageImageUrl{Url: "data:image/png,notbase64"}},
+	})
+	require.Len(t, parts, 2, "empty payloads are skipped; non-base64 data URLs fall back to fileData")
+	assert.Nil(t, parts[0].InlineData)
+	require.NotNil(t, parts[0].FileData)
+	assert.Equal(t, "image/png", parts[0].FileData.MimeType)
+}

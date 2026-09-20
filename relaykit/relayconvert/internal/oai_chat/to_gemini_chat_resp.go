@@ -104,6 +104,8 @@ func ResponseOpenAI2Gemini(openAIResponse *dto.OpenAITextResponse, info convmeta
 			content.Parts = append(content.Parts, part)
 		}
 
+		content.Parts = append(content.Parts, geminiImageParts(choice.Message.ParseImages())...)
+
 		toolCalls := choice.Message.ParseToolCalls()
 		for _, toolCall := range toolCalls {
 			part := dto.GeminiPart{
@@ -121,6 +123,54 @@ func ResponseOpenAI2Gemini(openAIResponse *dto.OpenAITextResponse, info convmeta
 	}
 
 	return geminiResponse
+}
+
+// geminiImageParts converts generated picture output from an OpenAI-compatible
+// provider into Gemini parts. A data URL becomes inlineData, a remote URL
+// becomes fileData; entries without a usable URL are skipped. Gemini clients
+// otherwise receive a candidate with no parts while still paying for the image.
+func geminiImageParts(images []dto.MessageImageOutput) []dto.GeminiPart {
+	if len(images) == 0 {
+		return nil
+	}
+	parts := make([]dto.GeminiPart, 0, len(images))
+	for _, image := range images {
+		if image.ImageUrl == nil {
+			continue
+		}
+		url := strings.TrimSpace(image.ImageUrl.Url)
+		if url == "" {
+			continue
+		}
+		if mimeType, data, ok := parseBase64DataURL(url); ok {
+			parts = append(parts, dto.GeminiPart{InlineData: &dto.GeminiInlineData{MimeType: mimeType, Data: data}})
+			continue
+		}
+		mimeType := strings.TrimSpace(image.ImageUrl.MimeType)
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		parts = append(parts, dto.GeminiPart{FileData: &dto.GeminiFileData{MimeType: mimeType, FileUri: url}})
+	}
+	return parts
+}
+
+// parseBase64DataURL splits "data:<mime>;base64,<payload>" into its mime type
+// and payload. Any other shape, including a non-base64 data URL, reports false.
+func parseBase64DataURL(url string) (string, string, bool) {
+	rest, ok := strings.CutPrefix(url, "data:")
+	if !ok {
+		return "", "", false
+	}
+	meta, payload, ok := strings.Cut(rest, ",")
+	if !ok {
+		return "", "", false
+	}
+	mimeType, ok := strings.CutSuffix(meta, ";base64")
+	if !ok || mimeType == "" || payload == "" {
+		return "", "", false
+	}
+	return mimeType, payload, true
 }
 
 // StreamResponseOpenAI2Gemini 将 OpenAI 流式响应转换为 Gemini 格式
@@ -218,6 +268,7 @@ func StreamResponseOpenAI2Gemini(openAIResponse *dto.ChatCompletionsStreamRespon
 				content.Parts = append(content.Parts, part)
 			}
 		}
+		content.Parts = append(content.Parts, geminiImageParts(choice.Delta.ParseImages())...)
 
 		candidate.Content = content
 		geminiResponse.Candidates = append(geminiResponse.Candidates, candidate)
@@ -262,10 +313,11 @@ func (s *ChatToGeminiStreamState) ConvertChunk(openAIResponse *dto.ChatCompletio
 	for _, choice := range openAIResponse.Choices {
 		s.seenChoices[choice.Index] = true
 		hasText := choice.Delta.GetContentString() != ""
+		imageParts := geminiImageParts(choice.Delta.ParseImages())
 		hasToolDelta := len(choice.Delta.ToolCalls) > 0
 		hasFinish := choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != ""
 		if s.finishedChoices[choice.Index] {
-			if hasText || hasToolDelta {
+			if hasText || hasToolDelta || len(imageParts) > 0 {
 				return nil, fmt.Errorf("OpenAI chat choice %d received data after completion", choice.Index)
 			}
 			continue
@@ -291,6 +343,7 @@ func (s *ChatToGeminiStreamState) ConvertChunk(openAIResponse *dto.ChatCompletio
 		if hasText {
 			candidate.Content.Parts = append(candidate.Content.Parts, dto.GeminiPart{Text: choice.Delta.GetContentString()})
 		}
+		candidate.Content.Parts = append(candidate.Content.Parts, imageParts...)
 		if hasFinish {
 			parts, err := s.finishChoice(choice.Index)
 			if err != nil {
