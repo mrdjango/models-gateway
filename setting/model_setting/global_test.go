@@ -42,3 +42,22 @@ func TestShouldPreserveThinkingSuffixExactAndRegex(t *testing.T) {
 	assert.True(t, ShouldPreserveThinkingSuffix("beta@sha256:abc"))
 	assert.False(t, ShouldPreserveThinkingSuffix("alpha@sha256:abc"))
 }
+
+func TestMaxPromptTokensFor(t *testing.T) {
+	settings := GetGlobalSettings()
+	original := settings.MaxPromptTokens
+	t.Cleanup(func() { settings.MaxPromptTokens = original })
+
+	settings.MaxPromptTokens = nil
+	assert.Equal(t, 0, MaxPromptTokensFor("claude-opus-5"))
+
+	settings.MaxPromptTokens = map[string]int{
+		"default":       200000,
+		"claude-opus-5": 250000,
+		"gpt-5.6-terra": 0,
+	}
+	assert.Equal(t, 250000, MaxPromptTokensFor("claude-opus-5"), "an exact entry wins")
+	assert.Equal(t, 250000, MaxPromptTokensFor("  claude-opus-5 "), "names are trimmed")
+	assert.Equal(t, 200000, MaxPromptTokensFor("claude-sonnet-5"), "unlisted models fall back to default")
+	assert.Equal(t, 0, MaxPromptTokensFor("gpt-5.6-terra"), "an explicit 0 opts out of the default cap")
+}

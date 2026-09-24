@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 )
@@ -52,6 +53,9 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeCountTokenFailed)
 	}
+	if apiErr := enforcePromptTokenLimit(info.OriginModelName, tokens); apiErr != nil {
+		return apiErr
+	}
 	info.SetEstimatePromptTokens(tokens)
 
 	priceData, err := helper.ModelPriceHelper(c, info, tokens, meta)
@@ -77,4 +81,19 @@ func RefundFailedRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, api
 	}
 	service.ChargeViolationFeeIfNeeded(c, info, apiErr)
 	return apiErr
+}
+
+// enforcePromptTokenLimit rejects a request whose estimated prompt exceeds the
+// operator's per-model cap (global.max_prompt_tokens). It runs before pre-consume
+// so an oversized context costs nothing upstream: a client that sends far more
+// than a model can accept otherwise gets billed for a request the model cannot
+// answer. The estimate is 0 when request-token counting is disabled, which
+// leaves every request uncapped.
+func enforcePromptTokenLimit(modelName string, tokens int) *types.NewAPIError {
+	limit := model_setting.MaxPromptTokensFor(modelName)
+	if limit <= 0 || tokens <= limit {
+		return nil
+	}
+	err := fmt.Errorf("prompt is %d tokens, above the %d token limit for model %s", tokens, limit, modelName)
+	return types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithStatusCode(http.StatusBadRequest))
 }

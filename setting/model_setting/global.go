@@ -43,6 +43,11 @@ type GlobalSettings struct {
 	// family whitelist but whose names already end in an effort word.
 	EffortTailModelIDs               []string                         `json:"effort_tail_model_ids"`
 	ChatCompletionsToResponsesPolicy ChatCompletionsToResponsesPolicy `json:"chat_completions_to_responses_policy"`
+	// MaxPromptTokens caps one request's estimated prompt tokens per model, so a
+	// runaway client context is rejected before it reaches an upstream that would
+	// bill for it. Keys are requested model names; the key "default" applies to
+	// models without their own entry. A missing or non-positive value means no cap.
+	MaxPromptTokens map[string]int `json:"max_prompt_tokens"`
 }
 
 // 默认配置
@@ -63,6 +68,7 @@ var defaultOpenaiSettings = GlobalSettings{
 		Enabled:     false,
 		AllChannels: true,
 	},
+	MaxPromptTokens: map[string]int{},
 }
 
 // 全局实例
@@ -184,4 +190,24 @@ func ShouldPreserveEffortTail(modelName string) bool {
 		}
 	}
 	return false
+}
+
+// MaxPromptTokensFor returns the prompt-token cap that applies to modelName, or
+// 0 when the model may send a prompt of any size. An exact model entry wins over
+// the "default" entry, which lets one model opt out of a global cap with 0.
+func MaxPromptTokensFor(modelName string) int {
+	limits := globalSettings.MaxPromptTokens
+	if len(limits) == 0 {
+		return 0
+	}
+	if limit, ok := limits[strings.TrimSpace(modelName)]; ok {
+		if limit <= 0 {
+			return 0
+		}
+		return limit
+	}
+	if limit := limits["default"]; limit > 0 {
+		return limit
+	}
+	return 0
 }
