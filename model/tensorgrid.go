@@ -155,6 +155,21 @@ type TensorGridTokenCreation struct {
 
 func (TensorGridTokenCreation) TableName() string { return "tensorgrid_token_creations" }
 
+// TensorGridFxRate is the current IRT-per-USD rate TensorGrid pushes to the
+// Gateway, kept as a single row. IRT wallets are denominated in IRT: every
+// wallet mutation first rebases the account onto this rate, so USD usage is
+// always converted at today's rate rather than the rate of the last top-up.
+type TensorGridFxRate struct {
+	Id              int64     `json:"-" gorm:"primaryKey"`
+	RateIrtPerUSD   string    `json:"rate_irt_per_usd" gorm:"type:varchar(64);not null"`
+	SnapshotId      int64     `json:"snapshot_id" gorm:"not null;default:0"`
+	FetchedAt       time.Time `json:"fetched_at"`
+	MaxStaleSeconds int       `json:"max_stale_seconds" gorm:"not null;default:0"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+func (TensorGridFxRate) TableName() string { return "tensorgrid_fx_rates" }
+
 type TensorGridBalanceSnapshot struct {
 	Subject         string `json:"subject"`
 	Currency        string `json:"currency"`
@@ -276,30 +291,21 @@ func UpsertTensorGridAccount(subject, email, displayName, currency, fxRate strin
 		if err := lockForUpdate(tx).Where("id = ?", account.UserId).First(&user).Error; err != nil {
 			return err
 		}
-		if account.Currency == TensorGridCurrencyIRT && currency == TensorGridCurrencyIRT &&
-			account.FxRateIrtPerUSD != fxRate {
-			balanceMicroUSD, conversionErr := quotaToMicroUSD(user.Quota)
-			if conversionErr != nil {
-				return conversionErr
+		if account.Currency == TensorGridCurrencyIRT && currency == TensorGridCurrencyIRT {
+			// Once TensorGrid pushes a Gateway-wide rate, that rate wins over the
+			// per-account one in this payload; otherwise the two would rebase the
+			// account back and forth on every sync.
+			current, rateErr := getTensorGridFxRateTx(tx)
+			if rateErr != nil {
+				return rateErr
 			}
-			balanceMinor, conversionErr := MicroUSDToTensorGridMinor(&account, balanceMicroUSD)
-			if conversionErr != nil {
-				return conversionErr
+			if current != nil {
+				fxRate = current.RateIrtPerUSD
 			}
-			rebasedQuota := 0
-			if balanceMinor != 0 {
-				updatedAccount := account
-				updatedAccount.FxRateIrtPerUSD = fxRate
-				rebasedQuota, conversionErr = tensorGridAmountToQuota(balanceMinor, 0, &updatedAccount)
-				if conversionErr != nil {
-					return conversionErr
-				}
-			}
-			if rebasedQuota != user.Quota {
-				if err := tx.Model(&User{}).Where("id = ?", user.Id).Update("quota", rebasedQuota).Error; err != nil {
+			if !tensorGridRatesEqual(account.FxRateIrtPerUSD, fxRate) {
+				if err := rebaseTensorGridAccountTx(tx, &account, &user, fxRate); err != nil {
 					return err
 				}
-				user.Quota = rebasedQuota
 			}
 		}
 		if err := tx.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]interface{}{
@@ -644,6 +650,14 @@ func AdjustTensorGridBalance(
 		if currency != account.Currency {
 			return ErrTensorGridCurrencyMismatch
 		}
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", account.UserId).First(&user).Error; err != nil {
+			return err
+		}
+		// An IRT amount must convert at today's rate, not the account's last one.
+		if err := applyCurrentTensorGridFxRateTx(tx, account, &user); err != nil {
+			return err
+		}
 		quotaDelta, err := tensorGridAmountToQuota(amountMinor, amountMicroUSD, account)
 		if err != nil {
 			return err
@@ -660,19 +674,11 @@ func AdjustTensorGridBalance(
 			}
 			appliedAmountMinor = existing.AppliedAmountMinor
 			appliedAmountMicroUSD = existing.AppliedAmountMicroUSD
-			var currentUser User
-			if err := lockForUpdate(tx).Where("id = ?", account.UserId).First(&currentUser).Error; err != nil {
-				return err
-			}
-			balanceAfter = currentUser.Quota
+			balanceAfter = user.Quota
 			return nil
 		}
 		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 			return existingErr
-		}
-		var user User
-		if err := lockForUpdate(tx).Where("id = ?", account.UserId).First(&user).Error; err != nil {
-			return err
 		}
 		appliedQuotaDelta := quotaDelta
 		if quotaDelta < 0 && user.Quota < -quotaDelta {
