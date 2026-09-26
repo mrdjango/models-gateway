@@ -351,6 +351,7 @@ func migrateDB() error {
 		&TensorGridBillingAdjustment{},
 		&TensorGridBalanceMutation{},
 		&TensorGridTokenCreation{},
+		&TensorGridFxRate{},
 		&PasskeyCredential{},
 		&Option{},
 		&LoginEncryptionKey{},

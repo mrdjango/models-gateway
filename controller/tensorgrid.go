@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -113,6 +114,57 @@ func AdjustTensorGridCredit(c *gin.Context) {
 		"applied_amount_minor":    appliedAmountMinor,
 		"applied_amount_microusd": appliedAmountMicroUSD,
 	})
+}
+
+type tensorGridFxRateRequest struct {
+	RateIrtPerUSD   string `json:"rate_irt_per_usd"`
+	SnapshotId      int64  `json:"snapshot_id"`
+	FetchedAt       int64  `json:"fetched_at"`
+	MaxStaleSeconds int    `json:"max_stale_seconds"`
+}
+
+func tensorGridFxRateResponse(rate *model.TensorGridFxRate) gin.H {
+	if rate == nil {
+		return nil
+	}
+	now := time.Now()
+	return gin.H{
+		"rate_irt_per_usd": rate.RateIrtPerUSD, "snapshot_id": rate.SnapshotId,
+		"fetched_at": rate.FetchedAt.Unix(), "max_stale_seconds": rate.MaxStaleSeconds,
+		"age_seconds": int64(now.Sub(rate.FetchedAt).Seconds()), "stale": rate.Stale(now),
+	}
+}
+
+// PutTensorGridFxRate receives TensorGrid's current IRT-per-USD snapshot. IRT
+// wallets are rebased onto it on their next mutation.
+func PutTensorGridFxRate(c *gin.Context) {
+	var request tensorGridFxRateRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		tensorGridError(c, err)
+		return
+	}
+	if request.FetchedAt <= 0 {
+		tensorGridError(c, errors.New("fetched_at must be a positive unix timestamp"))
+		return
+	}
+	rate, applied, err := model.SetTensorGridFxRate(
+		request.RateIrtPerUSD, request.SnapshotId,
+		time.Unix(request.FetchedAt, 0), request.MaxStaleSeconds,
+	)
+	if err != nil {
+		tensorGridError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "applied": applied, "data": tensorGridFxRateResponse(rate)})
+}
+
+func GetTensorGridFxRate(c *gin.Context) {
+	rate, err := model.GetTensorGridFxRate()
+	if err != nil {
+		tensorGridError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": tensorGridFxRateResponse(rate)})
 }
 
 func tensorGridTokenResponse(token *model.Token, reveal bool) gin.H {

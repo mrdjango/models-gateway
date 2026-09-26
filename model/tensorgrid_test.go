@@ -48,7 +48,7 @@ func setupTensorGridModelTest(t *testing.T) {
 	require.NoError(t, DB.AutoMigrate(
 		&User{}, &Token{}, &Channel{}, &Ability{}, &Option{}, &Log{}, &TensorGridAccount{},
 		&TensorGridBalanceMutation{}, &TensorGridTokenCreation{}, &TensorGridCreditOutbox{},
-		&TensorGridBillingSettlement{}, &TensorGridBillingAdjustment{},
+		&TensorGridBillingSettlement{}, &TensorGridBillingAdjustment{}, &TensorGridFxRate{},
 		&Model{}, &Vendor{},
 	))
 

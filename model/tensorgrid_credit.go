@@ -196,6 +196,9 @@ func ReserveTensorGridWalletQuota(userID int, requestID string, targetQuota int)
 		if err := lockForUpdate(tx).Where("id = ?", userID).First(&user).Error; err != nil {
 			return err
 		}
+		if err := applyCurrentTensorGridFxRateTx(tx, &account, &user); err != nil {
+			return err
+		}
 		var settlement TensorGridBillingSettlement
 		settlementErr := lockForUpdate(tx).
 			Where("account_id = ? AND request_id = ?", account.Id, requestID).
@@ -283,6 +286,9 @@ func SettleTensorGridWalletQuota(userID int, requestID string, actualQuota int, 
 
 		var user User
 		if err := lockForUpdate(tx).Where("id = ?", userID).First(&user).Error; err != nil {
+			return err
+		}
+		if err := applyCurrentTensorGridFxRateTx(tx, &account, &user); err != nil {
 			return err
 		}
 		var settlement TensorGridBillingSettlement
@@ -396,6 +402,9 @@ func AdjustTensorGridWalletQuota(userID int, requestID string, requestedQuotaDel
 		if err := lockForUpdate(tx).Where("id = ?", userID).First(&user).Error; err != nil {
 			return err
 		}
+		if err := applyCurrentTensorGridFxRateTx(tx, &account, &user); err != nil {
+			return err
+		}
 		appliedQuotaDelta = requestedQuotaDelta
 		if appliedQuotaDelta > user.Quota {
 			appliedQuotaDelta = user.Quota
@@ -481,6 +490,9 @@ func RefundTensorGridWalletQuota(userID int, requestID string) (handled bool, er
 		}
 		var user User
 		if err := lockForUpdate(tx).Where("id = ?", userID).First(&user).Error; err != nil {
+			return err
+		}
+		if err := applyCurrentTensorGridFxRateTx(tx, &account, &user); err != nil {
 			return err
 		}
 		var settlement TensorGridBillingSettlement
