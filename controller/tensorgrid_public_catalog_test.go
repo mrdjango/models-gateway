@@ -85,6 +85,52 @@ func TestTensorGridPublicCatalogUsesRequestMeterForFixedPricing(t *testing.T) {
 	assert.Equal(t, int64(0), pricing["input_per_million_microusd"])
 }
 
+// 回归：fixed(amount) 表达式是按请求计价，不能按每百万 token 解读
+// （fixed(0.06) 曾显示为 $60,000 / 1M tokens）。
+func TestTensorGridPublicCatalogUsesRequestMeterForFixedExpression(t *testing.T) {
+	for _, tc := range []struct {
+		expression string
+		want       int64
+	}{
+		{`tier("image", fixed(0.06)) * image_count`, 60_000},
+		{`tier("request", fixed(0.065))`, 65_000},
+	} {
+		t.Run(tc.expression, func(t *testing.T) {
+			public := tensorGridPublicModel(model.Pricing{
+				ModelName: "image:model", BillingMode: "tiered_expr", BillingExpr: tc.expression,
+				SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeImageGeneration},
+			})
+
+			pricing := public["pricing"].(gin.H)
+			assert.Equal(t, tc.want, pricing["extra_meters"].(gin.H)["request"])
+			assert.Equal(t, int64(0), pricing["input_per_million_microusd"])
+			assert.Equal(t, int64(0), pricing["output_per_million_microusd"])
+		})
+	}
+}
+
+// 回归：Gemini 原生图像模型只有 generateContent 端点，曾被归入 language 分类。
+func TestTensorGridPublicModelGeminiNativeImage(t *testing.T) {
+	public := tensorGridPublicModel(model.Pricing{
+		ModelName: "gemini-3-pro-image-c",
+		SupportedEndpointTypes: []constant.EndpointType{
+			constant.EndpointTypeGemini,
+			constant.EndpointTypeOpenAI,
+		},
+	})
+
+	assert.Equal(t, "image", public["category"])
+	assert.Equal(t, gin.H{"text": true, "image": true}, public["capabilities"])
+	assert.Equal(t, []string{"text", "image"}, public["input_modalities"])
+	assert.Equal(t, []string{"text", "image"}, public["output_modalities"])
+
+	chat := tensorGridPublicModel(model.Pricing{
+		ModelName:              "gemini-3-flash",
+		SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeGemini},
+	})
+	assert.Equal(t, "language", chat["category"])
+}
+
 // 语音转写模型必须以 audio.transcriptions 端点和 transcription 分类对外暴露，
 // 否则前端只能把它当作普通 chat 模型展示与筛选。
 func TestTensorGridPublicModelTranscription(t *testing.T) {
