@@ -58,6 +58,16 @@ func tensorGridPublicPricing(row model.Pricing) gin.H {
 	}
 	groupRatio := ratio_setting.GetGroupRatio("default")
 	if row.BillingMode == billing_setting.BillingModeTieredExpr && strings.TrimSpace(row.BillingExpr) != "" {
+		// fixed(amount) 表达式按请求计费：其结果本身就是单次请求的 micro-USD，
+		// 若按每百万 token 费率解读，fixed(0.06) 会显示成 $60,000 / 1M tokens。
+		// 以零用量（image_count 默认 1）求值，得到单次请求的零售价。
+		if billingexpr.UsesFixedPricing(row.BillingExpr) {
+			value, _, err := billingexpr.RunExpr(row.BillingExpr, billingexpr.TokenParams{Len: 1})
+			if err == nil && !math.IsNaN(value) && !math.IsInf(value, 0) && value > 0 {
+				pricing["extra_meters"].(gin.H)["request"] = int64(math.Round(value * groupRatio))
+			}
+			return pricing
+		}
 		used := billingexpr.UsedVars(row.BillingExpr)
 		rate := func(params billingexpr.TokenParams) float64 {
 			value, _, err := billingexpr.RunExpr(row.BillingExpr, params)
@@ -147,6 +157,14 @@ func tensorGridMicroUSD(dollarsPerMillion float64) int64 {
 // 端点决定基础模态；只有对话类端点才用计价倍率补充多模态输入，
 // 因为像语音转写这类端点的模态由端点本身唯一确定，
 // 此时残留的 image/audio 倍率并不代表该端点真的接受这些输入。
+// tensorGridNativeImageModel 识别经 generateContent 原生出图的 Gemini 图像模型
+// （gemini-3-pro-image、gemini-3.1-flash-image 等）。它们没有 images.generations 端点，
+// 只能依靠 Gemini 统一的 "-image" 命名约定区分，否则会被归入 language 分类。
+func tensorGridNativeImageModel(modelName string, endpoints []string) bool {
+	return slices.Contains(endpoints, "generateContent") &&
+		strings.Contains(strings.ToLower(modelName), "-image")
+}
+
 func tensorGridPublicModalities(row model.Pricing, endpoints []string) ([]string, []string) {
 	inputs := make([]string, 0, 3)
 	outputs := make([]string, 0, 2)
@@ -187,6 +205,11 @@ func tensorGridPublicModalities(row model.Pricing, endpoints []string) ([]string
 				outputs = add(outputs, "audio")
 			}
 		}
+	}
+	if tensorGridNativeImageModel(row.ModelName, endpoints) {
+		// 原生图像模型既可文生图，也接受参考图做编辑。
+		inputs = add(inputs, "image")
+		outputs = add(outputs, "image")
 	}
 	return inputs, outputs
 }
@@ -237,6 +260,10 @@ func tensorGridPublicModel(row model.Pricing) gin.H {
 		default:
 			capabilities["text"] = true
 		}
+	}
+	if category == "language" && tensorGridNativeImageModel(row.ModelName, endpoints) {
+		capabilities["image"] = true
+		category = "image"
 	}
 	inputModalities, outputModalities := tensorGridPublicModalities(row, endpoints)
 	return gin.H{
