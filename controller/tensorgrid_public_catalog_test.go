@@ -102,6 +102,25 @@ func TestTensorGridPublicModelTranscription(t *testing.T) {
 	assert.NotContains(t, public["capabilities"].(gin.H), "text")
 }
 
+// 回归：OpenRouter 渠道会为转写模型推导出 openai 端点，models 表的转写端点只追加不裁剪。
+// 转写模型调用 chat.completions 必然 400，目录只能暴露 audio.transcriptions。
+func TestTensorGridPublicModelTranscriptionDropsChannelDerivedChat(t *testing.T) {
+	row := model.Pricing{
+		ModelName: "openai/gpt-4o-transcribe",
+		SupportedEndpointTypes: []constant.EndpointType{
+			constant.EndpointTypeOpenAI,
+			constant.EndpointTypeOpenAIAudioTranscription,
+		},
+	}
+
+	public := tensorGridPublicModel(row)
+	assert.Equal(t, []string{"audio.transcriptions"}, public["endpoints"])
+	assert.Equal(t, "transcription", public["category"])
+	assert.Equal(t, gin.H{"audio": true}, public["capabilities"])
+	assert.Equal(t, []string{"audio"}, public["input_modalities"])
+	assert.Equal(t, []string{"text"}, public["output_modalities"])
+}
+
 // 输入模态用于前端按“接受什么类型的输入”筛选，必须由端点决定，
 // 而不是由残留的计价倍率决定。
 func TestTensorGridPublicModelModalities(t *testing.T) {

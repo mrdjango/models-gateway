@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"math"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
@@ -190,10 +192,17 @@ func tensorGridPublicModalities(row model.Pricing, endpoints []string) ([]string
 }
 
 func tensorGridPublicModel(row model.Pricing) gin.H {
-	endpoints := make([]string, 0, len(row.SupportedEndpointTypes))
+	// 渠道类型会为所有模型推导出 openai（chat.completions）端点，例如 OpenRouter 渠道；
+	// models 表声明的转写端点只会追加而不会裁剪它。转写模型实际无法走 chat.completions
+	// （上游直接返回 400），因此对外只暴露转写端点。
+	endpointTypes := row.SupportedEndpointTypes
+	if slices.Contains(endpointTypes, constant.EndpointTypeOpenAIAudioTranscription) {
+		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIAudioTranscription}
+	}
+	endpoints := make([]string, 0, len(endpointTypes))
 	capabilities := gin.H{}
 	category := "language"
-	for _, endpointType := range row.SupportedEndpointTypes {
+	for _, endpointType := range endpointTypes {
 		endpoint := tensorGridPublicEndpoint(string(endpointType))
 		if endpoint == "" {
 			continue
