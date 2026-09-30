@@ -45,6 +45,8 @@ func tensorGridPublicEndpoint(value string) string {
 		return "videos"
 	case "openai-audio-transcription":
 		return "audio.transcriptions"
+	case "openai-audio-speech":
+		return "audio.speech"
 	default:
 		return ""
 	}
@@ -182,6 +184,9 @@ func tensorGridPublicModalities(row model.Pricing, endpoints []string) ([]string
 		case "audio.transcriptions":
 			inputs = add(inputs, "audio")
 			outputs = add(outputs, "text")
+		case "audio.speech":
+			inputs = add(inputs, "text")
+			outputs = add(outputs, "audio")
 		case "images.generations":
 			inputs = add(inputs, "text")
 			outputs = add(outputs, "image")
@@ -221,6 +226,9 @@ func tensorGridPublicModel(row model.Pricing) gin.H {
 	endpointTypes := row.SupportedEndpointTypes
 	if slices.Contains(endpointTypes, constant.EndpointTypeOpenAIAudioTranscription) {
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIAudioTranscription}
+	} else if slices.Contains(endpointTypes, constant.EndpointTypeOpenAIAudioSpeech) {
+		// 语音合成模型同理：channel 推导出的 chat 端点对它无效，只暴露 audio.speech。
+		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIAudioSpeech}
 	}
 	endpoints := make([]string, 0, len(endpointTypes))
 	capabilities := gin.H{}
@@ -257,6 +265,10 @@ func tensorGridPublicModel(row model.Pricing) gin.H {
 			// 语音转写模型的输入是音频、输出是文本，不能落入默认的 text 分类。
 			capabilities["audio"] = true
 			category = "transcription"
+		case "audio.speech":
+			// 语音合成模型的输入是文本、输出是音频，单独归入 speech 分类。
+			capabilities["audio"] = true
+			category = "speech"
 		default:
 			capabilities["text"] = true
 		}

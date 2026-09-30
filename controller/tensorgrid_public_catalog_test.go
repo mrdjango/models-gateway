@@ -167,6 +167,25 @@ func TestTensorGridPublicModelTranscriptionDropsChannelDerivedChat(t *testing.T)
 	assert.Equal(t, []string{"text"}, public["output_modalities"])
 }
 
+// 语音合成模型归入 speech 分类，只暴露 audio.speech，
+// 即使渠道类型同时为它推导出了 chat 端点。
+func TestTensorGridPublicModelSpeech(t *testing.T) {
+	row := model.Pricing{
+		ModelName: "tts-rt-v2",
+		SupportedEndpointTypes: []constant.EndpointType{
+			constant.EndpointTypeOpenAI,
+			constant.EndpointTypeOpenAIAudioSpeech,
+		},
+	}
+
+	public := tensorGridPublicModel(row)
+	assert.Equal(t, []string{"audio.speech"}, public["endpoints"])
+	assert.Equal(t, "speech", public["category"])
+	assert.Equal(t, gin.H{"audio": true}, public["capabilities"])
+	assert.Equal(t, []string{"text"}, public["input_modalities"])
+	assert.Equal(t, []string{"audio"}, public["output_modalities"])
+}
+
 // 输入模态用于前端按“接受什么类型的输入”筛选，必须由端点决定，
 // 而不是由残留的计价倍率决定。
 func TestTensorGridPublicModelModalities(t *testing.T) {

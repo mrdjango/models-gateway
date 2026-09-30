@@ -78,6 +78,7 @@ export const ENDPOINT_TYPES = {
   EMBEDDINGS: 'embeddings',
   OPENAI_VIDEO: 'openai-video',
   OPENAI_AUDIO_TRANSCRIPTION: 'openai-audio-transcription',
+  OPENAI_AUDIO_SPEECH: 'openai-audio-speech',
 } as const
 
 export type EndpointTypeOption =
@@ -98,6 +99,7 @@ export function getEndpointTypeLabels(
     [ENDPOINT_TYPES.EMBEDDINGS]: t('Embeddings'),
     [ENDPOINT_TYPES.OPENAI_VIDEO]: t('Video'),
     [ENDPOINT_TYPES.OPENAI_AUDIO_TRANSCRIPTION]: t('Transcription'),
+    [ENDPOINT_TYPES.OPENAI_AUDIO_SPEECH]: t('Speech'),
   }
 }
 

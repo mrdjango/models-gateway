@@ -171,6 +171,7 @@ export const ENDPOINT_TEMPLATES: Record<
     path: '/v1/audio/transcriptions',
     method: 'POST',
   },
+  'openai-audio-speech': { path: '/v1/audio/speech', method: 'POST' },
 }
 
 // ============================================================================
