@@ -8,6 +8,14 @@ var builtinBillingExpr = map[string]string{
 	"gpt-image-2":            `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
 	"gpt-image-2.5-sunburst": `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
 	"gpt-image-2.5-flare":    `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
+	// https://soniox.com/pricing (2026-09-30). The audio relay counts 1000
+	// tokens per audio minute (60000 per hour). Async STT is $0.10/hour of
+	// input audio, so p is $0.10 / 60000 per token, in USD per million tokens.
+	// TTS input p is counted in characters (~0.3 Soniox text tokens each at
+	// $4.00/M) and output c is the generated audio, priced so an hour of
+	// speech totals the published ~$0.70.
+	"stt-async-v5": `tier("standard", p * 1.6667)`,
+	"tts-rt-v2":    `tier("standard", p * 1.2 + c * 10.62)`,
 	// https://developers.openai.com/api/docs/models/gpt-6-astra
 	// Standard pricing; the long-context rates apply to the whole request.
 	// Do not infer service-tier discounts from incoming request parameters:
