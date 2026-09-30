@@ -19,4 +19,5 @@ const (
 	EndpointTypeOpenAIVideo           = types.EndpointTypeOpenAIVideo
 
 	EndpointTypeOpenAIAudioTranscription = types.EndpointTypeOpenAIAudioTranscription
+	EndpointTypeOpenAIAudioSpeech        = types.EndpointTypeOpenAIAudioSpeech
 )

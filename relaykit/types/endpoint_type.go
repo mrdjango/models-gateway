@@ -18,6 +18,7 @@ const (
 	EndpointTypeOpenAIVideo           EndpointType = "openai-video"
 
 	EndpointTypeOpenAIAudioTranscription EndpointType = "openai-audio-transcription"
+	EndpointTypeOpenAIAudioSpeech        EndpointType = "openai-audio-speech"
 )
 
 // Finish reasons shared by the OpenAI-compatible response formats.
