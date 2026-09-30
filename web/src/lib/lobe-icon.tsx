@@ -35,6 +35,7 @@ import {
 } from 'react'
 
 import sglangLogo from '@/assets/brand-icons/sglang.svg'
+import sonioxLogo from '@/assets/brand-icons/soniox.png'
 import { IconSub2api } from '@/assets/custom/icon-sub2api'
 import { IconWan } from '@/assets/custom/icon-wan'
 
@@ -47,6 +48,16 @@ const CUSTOM_ICONS: Record<string, ComponentType<{ size?: number }>> = {
       width={props.size ?? 20}
       height={props.size ?? 20}
       className='object-contain'
+    />
+  ),
+  Soniox: (props) => (
+    <img
+      src={sonioxLogo}
+      alt=''
+      aria-hidden='true'
+      width={props.size ?? 20}
+      height={props.size ?? 20}
+      className='rounded-sm object-contain'
     />
   ),
   Sub2API: IconSub2api,
