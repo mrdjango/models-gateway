@@ -2,6 +2,7 @@ package soniox
 
 import (
 	"bytes"
+	"encoding/base64"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -233,4 +234,75 @@ func TestConvertAudioRequestRejectsUnsupportedModes(t *testing.T) {
 	info.RelayMode = relayconstant.RelayModeAudioTranslation
 	_, err = (&Adaptor{}).ConvertAudioRequest(nil, info, dto.AudioRequest{})
 	require.Error(t, err)
+}
+
+func TestTranscribeAcceptsInlineBase64Audio(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := &fakeSoniox{}
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(nil))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	audioReq := &dto.AudioRequest{
+		Model:          "stt-async-v5",
+		ResponseFormat: "json",
+		Language:       []byte(`"fa"`),
+		InputAudio:     &dto.AudioInput{Data: base64.StdEncoding.EncodeToString([]byte("RIFFdata")), Format: ".WAV"},
+	}
+	info := &relaycommon.RelayInfo{
+		RelayMode: relayconstant.RelayModeAudioTranscription,
+		Request:   audioReq,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelBaseUrl:    server.URL,
+			ApiKey:            "test-key",
+			UpstreamModelName: "stt-async-v5",
+		},
+	}
+
+	adaptor := &Adaptor{}
+	_, err := adaptor.ConvertAudioRequest(c, info, *audioReq)
+	require.NoError(t, err)
+	respAny, err := adaptor.DoRequest(c, info, nil)
+	require.NoError(t, err)
+	_, apiErr := adaptor.DoResponse(c, respAny.(*http.Response), info)
+	require.Nil(t, apiErr)
+
+	assert.Equal(t, []byte("RIFFdata"), upstream.fileBuf)
+	assert.Equal(t, []string{"fa"}, upstream.create.LanguageHints)
+	assert.Nil(t, upstream.create.Context, "the JSON body carries no prompt")
+	assert.JSONEq(t, `{"text":"Hello world","usage":{"type":"duration","seconds":61}}`, recorder.Body.String())
+}
+
+func TestTranscribeRejectsUndecodableInlineAudio(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(nil))
+	info := &relaycommon.RelayInfo{
+		RelayMode: relayconstant.RelayModeAudioTranscription,
+		Request: &dto.AudioRequest{
+			Model:      "stt-async-v5",
+			InputAudio: &dto.AudioInput{Data: "not-base64!!!", Format: "wav"},
+		},
+		ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "http://127.0.0.1:1", ApiKey: "k"},
+	}
+	_, err := (&Adaptor{}).DoRequest(c, info, nil)
+	require.ErrorContains(t, err, "error decoding input_audio data")
+}
+
+func TestInlineAudioFilename(t *testing.T) {
+	for format, want := range map[string]string{
+		"wav":           "audio.wav",
+		".MP3":          "audio.mp3",
+		" m4a ":         "audio.m4a",
+		"":              "audio",
+		"wav\"; x=y":    "audio",
+		"../../etc":     "audio",
+		"waytoolongfmt": "audio",
+	} {
+		assert.Equal(t, want, inlineAudioFilename(format), "format %q", format)
+	}
 }

@@ -97,3 +97,28 @@ func TestGetAndValidAudioRequestLeavesOtherChannelsUnchanged(t *testing.T) {
 	assert.Equal(t, "data:audio/wav;base64,AAECAwQF", req.InputAudio.Data)
 	assert.Equal(t, "json", req.ResponseFormat)
 }
+
+// Soniox assembles its own response, so unlike OpenRouter it still gets the
+// default response_format; its inline audio is normalised the same way.
+func TestGetAndValidAudioRequestInlineAudioForSoniox(t *testing.T) {
+	body := `{"model":"stt-async-v5","input_audio":{"data":"data:audio/wav;base64,AAEC\nAwQF","format":"wav"}}`
+	c := newAudioRequestContext(t, constant.ChannelTypeSoniox, body)
+
+	req, err := GetAndValidAudioRequest(c, relayconstant.RelayModeAudioTranscription)
+	require.NoError(t, err)
+	require.NotNil(t, req.InputAudio)
+	assert.Equal(t, "AAECAwQF", req.InputAudio.Data)
+	assert.Equal(t, "json", req.ResponseFormat)
+}
+
+// A channel without inline-audio support keeps the data untouched and the
+// multipart contract; the JSON body is rejected later, at token counting.
+func TestGetAndValidAudioRequestLeavesInlineAudioAloneOnOtherChannels(t *testing.T) {
+	body := `{"model":"whisper-1","input_audio":{"data":"data:audio/wav;base64,AAECAwQF","format":"wav"}}`
+	c := newAudioRequestContext(t, constant.ChannelTypeOpenAI, body)
+
+	req, err := GetAndValidAudioRequest(c, relayconstant.RelayModeAudioTranscription)
+	require.NoError(t, err)
+	assert.Equal(t, "data:audio/wav;base64,AAECAwQF", req.InputAudio.Data)
+	assert.Equal(t, "json", req.ResponseFormat)
+}

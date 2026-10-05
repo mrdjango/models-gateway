@@ -3,6 +3,7 @@ package soniox
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -334,14 +335,11 @@ func tokensToWords(tokens []sonioxToken) []transcriptionWord {
 // synthetic 200 response carrying the transcript. A non-2xx Soniox reply is
 // returned as-is so the standard relay error handling reports it.
 func transcribe(c *gin.Context, info *relaycommon.RelayInfo) (*http.Response, error) {
-	form, err := common.ParseMultipartFormReusable(c)
+	input, err := openTranscriptionInput(c, info)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing multipart form: %w", err)
+		return nil, err
 	}
-	fileHeaders := form.File["file"]
-	if len(fileHeaders) == 0 {
-		return nil, errors.New("file is required")
-	}
+	defer input.close()
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
@@ -367,17 +365,12 @@ func transcribe(c *gin.Context, info *relaycommon.RelayInfo) (*http.Response, er
 	defer cancel()
 
 	// Upload. The file is streamed so large recordings are not buffered twice.
-	file, err := fileHeaders[0].Open()
-	if err != nil {
-		return nil, fmt.Errorf("error opening audio file: %w", err)
-	}
-	defer file.Close()
 	pipeReader, pipeWriter := io.Pipe()
 	formWriter := multipart.NewWriter(pipeWriter)
 	go func() {
-		part, err := formWriter.CreateFormFile("file", fileHeaders[0].Filename)
+		part, err := formWriter.CreateFormFile("file", input.filename)
 		if err == nil {
-			_, err = io.Copy(part, file)
+			_, err = io.Copy(part, input.reader)
 		}
 		if err == nil {
 			err = formWriter.Close()
@@ -397,7 +390,7 @@ func transcribe(c *gin.Context, info *relaycommon.RelayInfo) (*http.Response, er
 	}
 	defer deleteUpstream(call, "/v1/files/"+uploaded.ID)
 
-	createBody, err := common.Marshal(buildCreateTranscription(info, form, uploaded.ID))
+	createBody, err := common.Marshal(buildCreateTranscription(info, input, uploaded.ID))
 	if err != nil {
 		return nil, fmt.Errorf("error marshalling soniox transcription request: %w", err)
 	}
@@ -458,15 +451,83 @@ func transcribe(c *gin.Context, info *relaycommon.RelayInfo) (*http.Response, er
 	}, nil
 }
 
-func buildCreateTranscription(info *relaycommon.RelayInfo, form *multipart.Form, fileID string) createTranscriptionRequest {
+func buildCreateTranscription(info *relaycommon.RelayInfo, input *transcriptionInput, fileID string) createTranscriptionRequest {
 	req := createTranscriptionRequest{Model: info.UpstreamModelName, FileID: fileID}
-	if language := strings.TrimSpace(firstFormValue(form, "language")); language != "" {
+	if language := strings.TrimSpace(input.language); language != "" {
 		req.LanguageHints = []string{language}
 	}
-	if prompt := strings.TrimSpace(firstFormValue(form, "prompt")); prompt != "" {
+	if prompt := strings.TrimSpace(input.prompt); prompt != "" {
 		req.Context = &transcriptionContext{Text: prompt}
 	}
 	return req
+}
+
+// transcriptionInput is the audio of one transcription request plus the
+// options that travel with it, whichever way the client sent them.
+type transcriptionInput struct {
+	filename string
+	reader   io.Reader
+	language string
+	prompt   string
+	close    func()
+}
+
+// openTranscriptionInput reads the audio from the request. Clients send it
+// either as a multipart `file` upload (the OpenAI contract) or, like the other
+// speech models here, as JSON with base64 `input_audio`. The JSON body has no
+// prompt field, so a prompt is only honoured on multipart uploads.
+func openTranscriptionInput(c *gin.Context, info *relaycommon.RelayInfo) (*transcriptionInput, error) {
+	if audioReq, ok := info.Request.(*dto.AudioRequest); ok && audioReq.InputAudio != nil {
+		data, err := base64.StdEncoding.DecodeString(audioReq.InputAudio.Data)
+		if err != nil {
+			return nil, fmt.Errorf("error decoding input_audio data: %w", err)
+		}
+		var language string
+		// Language arrives as raw JSON (`"fa"`); anything but a string is ignored.
+		_ = common.Unmarshal(audioReq.Language, &language)
+		return &transcriptionInput{
+			filename: inlineAudioFilename(audioReq.InputAudio.Format),
+			reader:   bytes.NewReader(data),
+			language: language,
+			close:    func() {},
+		}, nil
+	}
+
+	form, err := common.ParseMultipartFormReusable(c)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing multipart form: %w", err)
+	}
+	fileHeaders := form.File["file"]
+	if len(fileHeaders) == 0 {
+		return nil, errors.New("file is required")
+	}
+	file, err := fileHeaders[0].Open()
+	if err != nil {
+		return nil, fmt.Errorf("error opening audio file: %w", err)
+	}
+	return &transcriptionInput{
+		filename: fileHeaders[0].Filename,
+		reader:   file,
+		language: firstFormValue(form, "language"),
+		prompt:   firstFormValue(form, "prompt"),
+		close:    func() { _ = file.Close() },
+	}, nil
+}
+
+// inlineAudioFilename names the upload after the declared format ("wav" ->
+// "audio.wav"). The format is client-supplied, so anything that is not a short
+// alphanumeric extension falls back to a neutral name.
+func inlineAudioFilename(format string) string {
+	ext := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(format)), ".")
+	if ext == "" || len(ext) > 8 {
+		return "audio"
+	}
+	for _, r := range ext {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return "audio"
+		}
+	}
+	return "audio." + ext
 }
 
 func firstFormValue(form *multipart.Form, key string) string {

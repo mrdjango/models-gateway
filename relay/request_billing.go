@@ -52,6 +52,11 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 
 	tokens, err := service.EstimateRequestToken(c, meta, info)
 	if err != nil {
+		var audioErr *service.AudioInputError
+		if errors.As(err, &audioErr) {
+			// Bad audio input is the caller's mistake, not a gateway fault.
+			return types.NewError(err, types.ErrorCodeCountTokenFailed, types.ErrOptionWithStatusCode(http.StatusBadRequest))
+		}
 		return types.NewError(err, types.ErrorCodeCountTokenFailed)
 	}
 	if apiErr := enforcePromptTokenLimit(info.OriginModelName, tokens); apiErr != nil {

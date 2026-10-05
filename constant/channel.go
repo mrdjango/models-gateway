@@ -247,3 +247,11 @@ func IsAdvancedCustomChannel(channelType int) bool {
 		return false
 	}
 }
+
+// InlineAudioChannelType reports whether a channel type accepts a transcription
+// request that carries its audio inline as base64 (JSON `input_audio`) instead of
+// a multipart `file` upload. Every other channel keeps the OpenAI multipart
+// contract, so a JSON body sent to one of them is a client error.
+func InlineAudioChannelType(channelType int) bool {
+	return channelType == ChannelTypeOpenRouter || channelType == ChannelTypeSoniox
+}
