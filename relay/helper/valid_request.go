@@ -77,13 +77,15 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 		if audioRequest.Model == "" {
 			return nil, errors.New("model is required")
 		}
+		channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
+		isInlineAudio := audioRequest.InputAudio != nil && constant.InlineAudioChannelType(channelType)
 		// OpenRouter 的内联 base64 音频保持客户端原样：上游按自身默认返回，不注入 response_format。
-		isOpenRouterInlineAudio := audioRequest.InputAudio != nil &&
-			common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeOpenRouter
+		// Soniox 由网关自己组装响应，仍需要 response_format（默认 json）。
+		isOpenRouterInlineAudio := isInlineAudio && channelType == constant.ChannelTypeOpenRouter
 		if audioRequest.ResponseFormat == "" && !isOpenRouterInlineAudio {
 			audioRequest.ResponseFormat = "json"
 		}
-		if isOpenRouterInlineAudio {
+		if isInlineAudio {
 			// 在此规范化，使计费时的解码与转发给上游的内容始终是同一份 base64。
 			// 客户端常见的两种写法：带 data: URI 前缀，以及 base64 命令换行后未剔除换行符。
 			data := audioRequest.InputAudio.Data

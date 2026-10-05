@@ -206,3 +206,68 @@ func TestEstimateRequestTokenMultipartAudioUsesDuration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1000, tokens)
 }
+
+// Soniox (stt-async-v5) takes inline audio like the OpenRouter-backed speech
+// models, billed on the same per-minute duration rule.
+func TestEstimateRequestTokenInlineAudioAppliesToSoniox(t *testing.T) {
+	c := newInlineAudioContext(t, constant.ChannelTypeSoniox)
+	wav := buildPCMWav(t, 8000, 60)
+	info := &relaycommon.RelayInfo{
+		RelayMode: constant2.RelayModeAudioTranscription,
+		Request: &dto.AudioRequest{
+			Model:      "stt-async-v5",
+			InputAudio: &dto.AudioInput{Data: base64.StdEncoding.EncodeToString(wav), Format: "wav"},
+		},
+	}
+
+	tokens, err := EstimateRequestToken(c, &types.TokenCountMeta{}, info)
+	require.NoError(t, err)
+	assert.Equal(t, 1000, tokens)
+}
+
+// Bad audio input is the client's mistake: it must surface as an AudioInputError
+// (answered with 400) while keeping its message and underlying sentinel.
+func TestEstimateRequestTokenAudioInputErrorsAreClientErrors(t *testing.T) {
+	t.Run("undecodable base64", func(t *testing.T) {
+		c := newInlineAudioContext(t, constant.ChannelTypeSoniox)
+		info := &relaycommon.RelayInfo{
+			RelayMode: constant2.RelayModeAudioTranscription,
+			Request: &dto.AudioRequest{
+				Model:      "stt-async-v5",
+				InputAudio: &dto.AudioInput{Data: "not-base64!!!", Format: "wav"},
+			},
+		}
+		_, err := EstimateRequestToken(c, &types.TokenCountMeta{}, info)
+		var audioErr *AudioInputError
+		require.ErrorAs(t, err, &audioErr)
+		assert.Contains(t, err.Error(), "error decoding input_audio data")
+	})
+
+	t.Run("JSON body on a channel without inline audio", func(t *testing.T) {
+		c := newInlineAudioContext(t, constant.ChannelTypeOpenAI)
+		info := &relaycommon.RelayInfo{
+			RelayMode: constant2.RelayModeAudioTranscription,
+			Request:   &dto.AudioRequest{Model: "whisper-1"},
+		}
+		_, err := EstimateRequestToken(c, &types.TokenCountMeta{}, info)
+		var audioErr *AudioInputError
+		require.ErrorAs(t, err, &audioErr)
+		assert.Contains(t, err.Error(), "error parsing multipart form")
+	})
+
+	t.Run("unmeasurable duration", func(t *testing.T) {
+		c := newInlineAudioContext(t, constant.ChannelTypeSoniox)
+		wav := buildPCMWav(t, 8000, 5)
+		info := &relaycommon.RelayInfo{
+			RelayMode: constant2.RelayModeAudioTranscription,
+			Request: &dto.AudioRequest{
+				Model:      "stt-async-v5",
+				InputAudio: &dto.AudioInput{Data: base64.StdEncoding.EncodeToString(wav), Format: "mp3"},
+			},
+		}
+		_, err := EstimateRequestToken(c, &types.TokenCountMeta{}, info)
+		var audioErr *AudioInputError
+		require.ErrorAs(t, err, &audioErr)
+		require.ErrorIs(t, err, errAudioDurationNotMeasurable)
+	})
+}
