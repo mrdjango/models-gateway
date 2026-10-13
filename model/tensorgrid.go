@@ -702,6 +702,17 @@ func AdjustTensorGridBalance(
 		}
 		appliedAmountMinor = afterSnapshot.BalanceMinor - beforeSnapshot.BalanceMinor
 		appliedAmountMicroUSD = afterSnapshot.BalanceMicroUSD - beforeSnapshot.BalanceMicroUSD
+		// The snapshot difference rounds the balance twice, so it can land one
+		// unit either side of a request that was applied in full. Callers read a
+		// short report as uncollected debt, so a full application reports the
+		// requested amount in the unit it was requested in.
+		if appliedQuotaDelta == quotaDelta {
+			if amountMinor != 0 {
+				appliedAmountMinor = amountMinor
+			} else {
+				appliedAmountMicroUSD = amountMicroUSD
+			}
+		}
 		if err := tx.Model(&User{}).Where("id = ?", user.Id).Update("quota", balanceAfter).Error; err != nil {
 			return err
 		}
