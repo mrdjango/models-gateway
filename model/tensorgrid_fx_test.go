@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -183,4 +184,45 @@ func TestTensorGridUpsertPrefersPushedRateOverPayloadRate(t *testing.T) {
 	assert.Equal(t, "120000", account.FxRateIrtPerUSD)
 	balance := requireTensorGridBalanceMinor(t, subject, 10_000_000)
 	assert.Equal(t, 41_666_667, balance.BalanceQuota)
+}
+
+// At a rate that does not divide evenly into quota, the balance before and
+// after a debit rounds separately, so their difference can sit one IRT either
+// side of the request. TensorGrid reads a short report as uncollected debt and
+// destroys the GPU node, so a debit applied in full must report the request.
+func TestTensorGridIrtFullDebitReportsRequestedAmount(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "6d0f3b7a-2e4c-4b9d-8a1f-5c3e7b9d1a20"
+	_, err := UpsertTensorGridAccount(subject, "irt@example.com", "Irt", "IRT", "264870", true, 1)
+	require.NoError(t, err)
+	_, _, _, _, err = AdjustTensorGridBalance(subject, "seed:"+subject, "IRT", 1_500_000, 0, "seed", false)
+	require.NoError(t, err)
+
+	for i, amountMinor := range []int64{-901, -902, -903, -904, -905, -906, -907, -908, -909, -910, -911, -912, -913, -914, -915, -916, -917, -918, -919, -920} {
+		key := fmt.Sprintf("compute:%08d", i)
+		_, created, appliedMinor, _, err := AdjustTensorGridBalance(subject, key, "IRT", amountMinor, 0, "compute usage", true)
+		require.NoError(t, err)
+		require.True(t, created)
+		assert.Equal(t, amountMinor, appliedMinor, "debit %d", amountMinor)
+
+		_, created, replayedMinor, _, err := AdjustTensorGridBalance(subject, key, "IRT", amountMinor, 0, "compute usage", true)
+		require.NoError(t, err)
+		require.False(t, created)
+		assert.Equal(t, amountMinor, replayedMinor, "replayed debit %d", amountMinor)
+	}
+}
+
+// A partial debit drains the wallet, so it reports exactly what was left.
+func TestTensorGridIrtPartialDebitReportsCollectedBalance(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "7e1a4c8b-3f5d-4c0e-9b2a-6d4f8c0e2b31"
+	_, err := UpsertTensorGridAccount(subject, "irt@example.com", "Irt", "IRT", "264870", true, 1)
+	require.NoError(t, err)
+	seeded, _, _, _, err := AdjustTensorGridBalance(subject, "seed:"+subject, "IRT", 1_000, 0, "seed", false)
+	require.NoError(t, err)
+
+	after, _, appliedMinor, _, err := AdjustTensorGridBalance(subject, "compute:partial01", "IRT", -5_000, 0, "compute usage", true)
+	require.NoError(t, err)
+	assert.Equal(t, -seeded.BalanceMinor, appliedMinor)
+	assert.Equal(t, 0, after.BalanceQuota)
 }
