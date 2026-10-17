@@ -64,6 +64,8 @@ func main() {
 	}
 
 	common.SysLog("New API " + common.Version + " started")
+	middleware.InitErrorReporting() // TensorGrid: GlitchTip
+	defer middleware.FlushErrorReporting()
 	if os.Getenv("GIN_MODE") != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -193,6 +195,7 @@ func main() {
 			},
 		})
 	}))
+	server.Use(middleware.ErrorReporting()) // TensorGrid: GlitchTip
 	// This will cause SSE not to work!!!
 	//server.Use(gzip.Gzip(gzip.DefaultCompression))
 	server.Use(middleware.RequestId())

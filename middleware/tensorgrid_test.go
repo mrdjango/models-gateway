@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
@@ -64,4 +65,22 @@ func TestTensorGridServiceAuthCoversQueryString(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+func TestScrubReportedRequestDropsCredentialCarriers(t *testing.T) {
+	httpReq := httptest.NewRequest(http.MethodPost, "https://gateway.tensorgrid.space/v1/chat/completions?key=sk-secret#frag", strings.NewReader(`{"messages":[]}`))
+	httpReq.Header.Set("Authorization", "Bearer sk-secret")
+	httpReq.Header.Set("Cookie", "session=abc")
+	httpReq.Header.Set("X-Api-Key", "sk-other")
+	httpReq.Header.Set("User-Agent", "openai-python/1.0")
+	req := sentry.NewRequest(httpReq)
+	req.Data = `{"messages":[]}`
+
+	scrubReportedRequest(req)
+
+	assert.Equal(t, "https://gateway.tensorgrid.space/v1/chat/completions", req.URL)
+	assert.Empty(t, req.QueryString)
+	assert.Empty(t, req.Cookies)
+	assert.Empty(t, req.Data)
+	assert.Equal(t, map[string]string{"Host": "gateway.tensorgrid.space", "User-Agent": "openai-python/1.0"}, req.Headers)
 }
