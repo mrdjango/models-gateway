@@ -382,6 +382,38 @@ func TensorGridUsage(c *gin.Context) {
 	}})
 }
 
+// TensorGridUsageTrend returns usage aggregated into hour, day, or month
+// buckets on the wall clock of the IANA zone in tz (UTC by default).
+func TensorGridUsageTrend(c *gin.Context) {
+	account, err := model.GetTensorGridAccount(c.Param("subject"))
+	if err != nil {
+		tensorGridError(c, err)
+		return
+	}
+	bucket := c.DefaultQuery("bucket", "day")
+	if bucket != "hour" && bucket != "day" && bucket != "month" {
+		tensorGridError(c, errors.New("bucket must be hour, day, or month"))
+		return
+	}
+	loc, err := time.LoadLocation(c.DefaultQuery("tz", "UTC"))
+	if err != nil {
+		tensorGridError(c, errors.New("tz must be an IANA time zone"))
+		return
+	}
+	start, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	end, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	trend, err := model.GetTensorGridUserUsageTrend(account, model.TensorGridUsageFilter{
+		StartTimestamp: start, EndTimestamp: end, ModelName: c.Query("model_name"),
+		TokenName: c.Query("token_name"), Status: c.Query("status"),
+		Source: c.Query("source"), Stream: c.Query("stream"),
+	}, bucket, loc)
+	if err != nil {
+		tensorGridError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": trend})
+}
+
 func tensorGridUsageNumber(value interface{}) int64 {
 	switch typed := value.(type) {
 	case float64:
