@@ -454,11 +454,10 @@ func tensorGridLogNumber(other map[string]interface{}, key string) int64 {
 	}
 }
 
-func tensorGridLogBilling(log *Log, fallback *TensorGridAccount) (string, string) {
+func tensorGridLogBilling(other map[string]any, fallback *TensorGridAccount) (string, string) {
 	currency := fallback.Currency
 	fxRate := fallback.FxRateIrtPerUSD
-	other, _ := common.StrToMap(log.Other)
-	billing, _ := other["tensorgrid_billing"].(map[string]interface{})
+	billing, _ := other["tensorgrid_billing"].(map[string]any)
 	if value, ok := billing["currency"].(string); ok &&
 		(value == TensorGridCurrencyUSD || value == TensorGridCurrencyIRT) {
 		currency = value
@@ -469,109 +468,179 @@ func tensorGridLogBilling(log *Log, fallback *TensorGridAccount) (string, string
 	return currency, fxRate
 }
 
-func GetTensorGridUserUsage(
-	account *TensorGridAccount, startTimestamp, endTimestamp int64, modelName, tokenName string,
-	startIdx, num int, requestId, status, source, stream string,
-) ([]*Log, int64, TensorGridUsageTotals, error) {
-	totals := TensorGridUsageTotals{
-		ChargeMicroUSD: map[string]int64{},
-		ChargeMinor:    map[string]int64{},
-	}
+// TensorGridUsageFilter narrows a TensorGrid user's consume and error logs.
+// Zero values leave a dimension unfiltered.
+type TensorGridUsageFilter struct {
+	StartTimestamp int64
+	EndTimestamp   int64
+	ModelName      string
+	TokenName      string
+	RequestId      string
+	Status         string
+	Source         string
+	Stream         string
+}
+
+func tensorGridUsageQuery(account *TensorGridAccount, filter TensorGridUsageFilter) (*gorm.DB, error) {
 	logTypes := []int{LogTypeConsume, LogTypeError}
-	if status == "succeeded" {
+	if filter.Status == "succeeded" {
 		logTypes = []int{LogTypeConsume}
-	} else if status == "failed" {
+	} else if filter.Status == "failed" {
 		logTypes = []int{LogTypeError}
-	} else if status != "" {
+	} else if filter.Status != "" {
 		logTypes = []int{-1}
 	}
 	tx := LOG_DB.Where("logs.user_id = ? AND logs.type IN ?", account.UserId, logTypes)
 	var err error
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
-		return nil, 0, totals, err
+	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", filter.ModelName); err != nil {
+		return nil, err
 	}
-	if tokenName != "" {
-		tx = tx.Where("logs.token_name = ?", tokenName)
+	if filter.TokenName != "" {
+		tx = tx.Where("logs.token_name = ?", filter.TokenName)
 	}
-	if source == "playground" {
+	if filter.Source == "playground" {
 		tx = tx.Where("logs.token_name = ?", "TensorGrid Playground")
-	} else if source == "api" {
+	} else if filter.Source == "api" {
 		tx = tx.Where("logs.token_name <> ?", "TensorGrid Playground")
-	} else if source != "" {
+	} else if filter.Source != "" {
 		tx = tx.Where("1 = 0")
 	}
-	if stream == "true" {
+	if filter.Stream == "true" {
 		tx = tx.Where("logs.is_stream = ?", true)
-	} else if stream == "false" {
+	} else if filter.Stream == "false" {
 		tx = tx.Where("logs.is_stream = ?", false)
-	} else if stream != "" {
+	} else if filter.Stream != "" {
 		tx = tx.Where("1 = 0")
 	}
-	if requestId != "" {
-		tx = tx.Where("logs.request_id = ?", requestId)
+	if filter.RequestId != "" {
+		tx = tx.Where("logs.request_id = ?", filter.RequestId)
 	}
-	if startTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", startTimestamp)
+	if filter.StartTimestamp != 0 {
+		tx = tx.Where("logs.created_at >= ?", filter.StartTimestamp)
 	}
-	if endTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", endTimestamp)
+	if filter.EndTimestamp != 0 {
+		tx = tx.Where("logs.created_at <= ?", filter.EndTimestamp)
+	}
+	// A new session makes the query safe to reuse for the totals scan and the page.
+	return tx.Model(&Log{}).Session(&gorm.Session{}), nil
+}
+
+func newTensorGridUsageTotals() TensorGridUsageTotals {
+	return TensorGridUsageTotals{
+		ChargeMicroUSD: map[string]int64{},
+		ChargeMinor:    map[string]int64{},
+	}
+}
+
+// tensorGridUsageCharge is one log's contribution to usage totals, priced in
+// the currency and FX rate stamped on the log when it was billed.
+type tensorGridUsageCharge struct {
+	succeeded        bool
+	inputTokens      int64
+	outputTokens     int64
+	cacheReadTokens  int64
+	cacheWriteTokens int64
+	currency         string
+	chargeMicroUSD   int64
+	chargeMinor      int64
+}
+
+func tensorGridUsageChargeFromLog(log *Log, account *TensorGridAccount) (tensorGridUsageCharge, error) {
+	other, _ := common.StrToMap(log.Other)
+	chargeMicroUSD, err := quotaToMicroUSD(log.Quota)
+	if err != nil {
+		return tensorGridUsageCharge{}, err
+	}
+	currency, fxRate := tensorGridLogBilling(other, account)
+	billingAccount := *account
+	billingAccount.Currency = currency
+	billingAccount.FxRateIrtPerUSD = fxRate
+	chargeMinor, err := MicroUSDToTensorGridMinor(&billingAccount, chargeMicroUSD)
+	if err != nil {
+		return tensorGridUsageCharge{}, err
+	}
+	return tensorGridUsageCharge{
+		succeeded:        log.Type == LogTypeConsume,
+		inputTokens:      int64(log.PromptTokens),
+		outputTokens:     int64(log.CompletionTokens),
+		cacheReadTokens:  tensorGridLogNumber(other, "cache_tokens"),
+		cacheWriteTokens: tensorGridLogNumber(other, "cache_write_tokens"),
+		currency:         currency,
+		chargeMicroUSD:   chargeMicroUSD,
+		chargeMinor:      chargeMinor,
+	}, nil
+}
+
+func (totals *TensorGridUsageTotals) add(charge tensorGridUsageCharge) {
+	totals.RequestCount++
+	if charge.succeeded {
+		totals.Successful++
+	} else {
+		totals.Failed++
+	}
+	totals.InputTokens += charge.inputTokens
+	totals.OutputTokens += charge.outputTokens
+	totals.CacheReadTokens += charge.cacheReadTokens
+	totals.CacheWriteTokens += charge.cacheWriteTokens
+	totals.ChargeMicroUSD[charge.currency] += charge.chargeMicroUSD
+	totals.ChargeMinor[charge.currency] += charge.chargeMinor
+}
+
+// scanTensorGridUsage reads every log the query matches once, in no particular
+// order, and hands each one's charge to visit.
+func scanTensorGridUsage(
+	base *gorm.DB, account *TensorGridAccount, visit func(log *Log, charge tensorGridUsageCharge),
+) error {
+	rows, err := base.Select(
+		"logs.created_at", "logs.type", "logs.model_name", "logs.quota",
+		"logs.prompt_tokens", "logs.completion_tokens", "logs.other",
+	).Rows()
+	if err != nil {
+		return errors.New("failed to query TensorGrid usage totals")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var log Log
+		if err := LOG_DB.ScanRows(rows, &log); err != nil {
+			return errors.New("failed to scan TensorGrid usage totals")
+		}
+		charge, err := tensorGridUsageChargeFromLog(&log, account)
+		if err != nil {
+			return err
+		}
+		visit(&log, charge)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("failed to read TensorGrid usage totals")
+	}
+	return nil
+}
+
+func GetTensorGridUserUsage(
+	account *TensorGridAccount, startTimestamp, endTimestamp int64, modelName, tokenName string,
+	startIdx, num int, requestId, status, source, stream string,
+) ([]*Log, int64, TensorGridUsageTotals, error) {
+	totals := newTensorGridUsageTotals()
+	base, err := tensorGridUsageQuery(account, TensorGridUsageFilter{
+		StartTimestamp: startTimestamp, EndTimestamp: endTimestamp, ModelName: modelName,
+		TokenName: tokenName, RequestId: requestId, Status: status, Source: source, Stream: stream,
+	})
+	if err != nil {
+		return nil, 0, totals, err
 	}
 	order := "logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		order = clickHouseLogOrder("logs.")
 	}
-	base := tx.Model(&Log{})
-	var total int64
-	if err := base.Count(&total).Error; err != nil {
-		return nil, 0, totals, errors.New("failed to query TensorGrid usage")
+	// The totals scan already visits every matching row, so it doubles as the count.
+	if err := scanTensorGridUsage(base, account, func(_ *Log, charge tensorGridUsageCharge) {
+		totals.add(charge)
+	}); err != nil {
+		return nil, 0, totals, err
 	}
-	totalRows, err := base.Select(
-		"logs.type", "logs.quota", "logs.prompt_tokens", "logs.completion_tokens", "logs.other",
-	).Rows()
-	if err != nil {
-		return nil, 0, totals, errors.New("failed to query TensorGrid usage totals")
-	}
-	defer totalRows.Close()
-	for totalRows.Next() {
-		var log Log
-		if err := LOG_DB.ScanRows(totalRows, &log); err != nil {
-			return nil, 0, totals, errors.New("failed to scan TensorGrid usage totals")
-		}
-		totals.RequestCount++
-		if log.Type == LogTypeConsume {
-			totals.Successful++
-		} else {
-			totals.Failed++
-		}
-		totals.InputTokens += int64(log.PromptTokens)
-		totals.OutputTokens += int64(log.CompletionTokens)
-		other, _ := common.StrToMap(log.Other)
-		totals.CacheReadTokens += tensorGridLogNumber(other, "cache_tokens")
-		totals.CacheWriteTokens += tensorGridLogNumber(other, "cache_write_tokens")
-		chargeMicroUSD, conversionErr := quotaToMicroUSD(log.Quota)
-		if conversionErr != nil {
-			return nil, 0, totals, conversionErr
-		}
-		currency, fxRate := tensorGridLogBilling(&log, account)
-		totals.ChargeMicroUSD[currency] += chargeMicroUSD
-		billingAccount := *account
-		billingAccount.Currency = currency
-		billingAccount.FxRateIrtPerUSD = fxRate
-		chargeMinor, conversionErr := MicroUSDToTensorGridMinor(&billingAccount, chargeMicroUSD)
-		if conversionErr != nil {
-			return nil, 0, totals, conversionErr
-		}
-		totals.ChargeMinor[currency] += chargeMinor
-	}
-	if err := totalRows.Err(); err != nil {
-		return nil, 0, totals, errors.New("failed to read TensorGrid usage totals")
-	}
-	if startIdx < 0 {
-		startIdx = 0
-	}
-	if num < 0 {
-		num = 0
-	}
+	total := totals.RequestCount
+	startIdx = max(startIdx, 0)
+	num = max(num, 0)
 	if int64(startIdx) >= total || num == 0 {
 		return []*Log{}, total, totals, nil
 	}

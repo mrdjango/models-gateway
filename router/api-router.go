@@ -287,6 +287,7 @@ func SetApiRouter(router *gin.Engine) {
 			tensorGridRoute.POST("/users/:subject/tokens/:token_id/reveal", controller.RevealTensorGridToken)
 			tensorGridRoute.DELETE("/users/:subject/tokens/:token_id", controller.RevokeTensorGridToken)
 			tensorGridRoute.GET("/users/:subject/usage", controller.TensorGridUsage)
+			tensorGridRoute.GET("/users/:subject/usage/trend", controller.TensorGridUsageTrend)
 		}
 		tokenRoute := apiRouter.Group("/token")
 		tokenRoute.Use(middleware.UserAuth())

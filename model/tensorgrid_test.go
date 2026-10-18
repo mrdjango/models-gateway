@@ -725,6 +725,93 @@ func TestTensorGridUsageTotalsCoverAllFilteredRowsNotOnlyThePage(t *testing.T) {
 	assert.Equal(t, int64(4), totals.CacheWriteTokens)
 }
 
+func TestTensorGridUsageTrendMatchesUsageTotalsAndBucketsByZone(t *testing.T) {
+	setupTensorGridModelTest(t)
+	const subject = "9b0e7c3a-6d1f-4c52-8a7e-2f4b1d9c6e10"
+	account, err := UpsertTensorGridAccount(subject, "trend@example.com", "Trend", "IRT", "1000000", true, 1)
+	require.NoError(t, err)
+	usdBilling := common.MapToJsonStr(map[string]any{
+		"cache_tokens": 2, "tensorgrid_billing": map[string]any{"currency": "USD"},
+	})
+	// 2026-10-01 20:00 UTC is 2026-10-01 23:30 in Tehran; 20:45 UTC is already
+	// 2026-10-02 00:15 there, so the two zones split these rows differently.
+	logs := []Log{
+		{UserId: account.UserId, Type: LogTypeConsume, CreatedAt: 1790884800, ModelName: "model-b",
+			Quota: 500_000, PromptTokens: 10, CompletionTokens: 5, RequestId: "trend-1", Other: "{}"},
+		{UserId: account.UserId, Type: LogTypeConsume, CreatedAt: 1790887500, ModelName: " model-a ",
+			Quota: 250_000, PromptTokens: 4, CompletionTokens: 1, RequestId: "trend-2", Other: usdBilling},
+		{UserId: account.UserId, Type: LogTypeError, CreatedAt: 1790974800, ModelName: "model-a",
+			PromptTokens: 3, RequestId: "trend-3", Other: "{}"},
+	}
+	require.NoError(t, LOG_DB.Create(&logs).Error)
+
+	_, total, totals, err := GetTensorGridUserUsage(account, 0, 0, "", "", 0, 1, "", "", "", "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	utcTrend, err := GetTensorGridUserUsageTrend(account, TensorGridUsageFilter{}, "day", time.UTC)
+	require.NoError(t, err)
+	assert.Equal(t, totals, utcTrend.Totals)
+	assert.Equal(t, int64(1790884800), utcTrend.FirstCreatedAt)
+	require.Len(t, utcTrend.Points, 2)
+	assert.Equal(t, int64(1790812800), utcTrend.Points[0].BucketStart)
+	assert.Equal(t, int64(2), utcTrend.Points[0].RequestCount)
+	assert.Equal(t, int64(1_000_000), utcTrend.Points[0].ChargeMicroUSD["IRT"])
+	assert.Equal(t, int64(1_000_000), utcTrend.Points[0].ChargeMinor["IRT"])
+	assert.Equal(t, int64(500_000), utcTrend.Points[0].ChargeMicroUSD["USD"])
+	assert.Equal(t, int64(50), utcTrend.Points[0].ChargeMinor["USD"])
+	assert.Equal(t, int64(2), utcTrend.Points[0].CacheReadTokens)
+	assert.Equal(t, int64(1790899200), utcTrend.Points[1].BucketStart)
+	assert.Equal(t, int64(1), utcTrend.Points[1].Failed)
+	require.Len(t, utcTrend.ByModel, 2)
+	assert.Equal(t, "model-a", utcTrend.ByModel[0].Model)
+	assert.Equal(t, int64(2), utcTrend.ByModel[0].RequestCount)
+	assert.Equal(t, "model-b", utcTrend.ByModel[1].Model)
+
+	tehran, err := time.LoadLocation("Asia/Tehran")
+	require.NoError(t, err)
+	tehranTrend, err := GetTensorGridUserUsageTrend(account, TensorGridUsageFilter{}, "day", tehran)
+	require.NoError(t, err)
+	require.Len(t, tehranTrend.Points, 3)
+	assert.Equal(t, int64(1790800200), tehranTrend.Points[0].BucketStart)
+	assert.Equal(t, int64(1790886600), tehranTrend.Points[1].BucketStart)
+
+	failed, err := GetTensorGridUserUsageTrend(account, TensorGridUsageFilter{
+		Status: "failed", StartTimestamp: 1790884800, EndTimestamp: 1790974800,
+	}, "month", time.UTC)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), failed.Totals.RequestCount)
+	require.Len(t, failed.Points, 1)
+	assert.Equal(t, int64(1790812800), failed.Points[0].BucketStart)
+}
+
+func TestTensorGridUsageBucketStart(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	tehran, err := time.LoadLocation("Asia/Tehran")
+	require.NoError(t, err)
+	tests := []struct {
+		name      string
+		createdAt int64
+		bucket    string
+		loc       *time.Location
+		want      int64
+	}{
+		{"utc hour", 1790887500, "hour", time.UTC, 1790884800},
+		{"half-hour zone hour", 1790887500, "hour", tehran, 1790886600},
+		// 2026-11-01 01:30 EDT and 01:30 EST share a wall clock but are an hour apart.
+		{"first repeated dst hour", 1793511000, "hour", newYork, 1793509200},
+		{"second repeated dst hour", 1793514600, "hour", newYork, 1793512800},
+		{"day across dst change", 1793548800, "day", newYork, 1793505600},
+		{"month", 1790974800, "month", time.UTC, 1790812800},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, TensorGridUsageBucketStart(tt.createdAt, tt.bucket, tt.loc))
+		})
+	}
+}
+
 // 钱包余额上限跟随 common.MaxWalletQuota（64 位），而非单次请求的 int32 上限：
 // 上游的充值/兑换路径已经允许余额越过 int32，TensorGrid 的入账与结算必须跟上，
 // 否则余额一旦超过 int32 就会在扣费时报错，请求被免费放行且不产生入账事件。
