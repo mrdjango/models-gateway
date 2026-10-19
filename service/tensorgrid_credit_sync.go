@@ -25,6 +25,7 @@ const (
 	tensorGridCreditSyncIntervalEnv = "TENSORGRID_CREDIT_SYNC_INTERVAL_SECONDS"
 	tensorGridSnapshotIntervalEnv   = "TENSORGRID_CREDIT_SNAPSHOT_INTERVAL_SECONDS"
 	tensorGridReservationTimeoutEnv = "TENSORGRID_RESERVATION_TIMEOUT_SECONDS"
+	tensorGridReconcileIntervalEnv  = "TENSORGRID_CREDIT_RECONCILE_INTERVAL_SECONDS"
 	tensorGridCallbackBaseURLEnv    = "TENSORGRID_CALLBACK_BASE_URL"
 	tensorGridCallbackSecretEnv     = "TENSORGRID_INTEGRATION_SECRET"
 )
@@ -76,7 +77,10 @@ func StartTensorGridCreditSync() {
 		go func() {
 			_, _, interval, snapshotInterval := tensorGridSyncConfig()
 			reservationTimeout := envDuration(tensorGridReservationTimeoutEnv, 7200)
-			lastSnapshot := time.Time{}
+			// Replaying consume logs only repairs a crash window, so it need not
+			// run on the 1 s delivery tick.
+			reconcileInterval := envDuration(tensorGridReconcileIntervalEnv, 300)
+			lastSnapshot, lastReconcile := time.Time{}, time.Time{}
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
@@ -89,11 +93,14 @@ func StartTensorGridCreditSync() {
 				} else if refunded > 0 || refundFailed > 0 {
 					common.SysLog(fmt.Sprintf("TensorGrid stale reservation recovery: refunded=%d failed=%d", refunded, refundFailed))
 				}
-				replayed, failed, reconcileErr := model.ReconcileTensorGridCreditEvents(1000)
-				if reconcileErr != nil {
-					common.SysLog("TensorGrid credit reconciliation failed: " + reconcileErr.Error())
-				} else if failed > 0 {
-					common.SysLog(fmt.Sprintf("TensorGrid credit reconciliation: replayed=%d failed=%d", replayed, failed))
+				if now.Sub(lastReconcile) >= reconcileInterval {
+					replayed, failed, reconcileErr := model.ReconcileTensorGridCreditEvents(1000)
+					if reconcileErr != nil {
+						common.SysLog("TensorGrid credit reconciliation failed: " + reconcileErr.Error())
+					} else if failed > 0 {
+						common.SysLog(fmt.Sprintf("TensorGrid credit reconciliation: replayed=%d failed=%d", replayed, failed))
+					}
+					lastReconcile = now
 				}
 				if now.Sub(lastSnapshot) >= snapshotInterval {
 					if err := EnqueueTensorGridSnapshots(500); err != nil {

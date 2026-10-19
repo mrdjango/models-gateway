@@ -21,8 +21,11 @@ const (
 )
 
 var (
-	tensorGridReconcileMu     sync.Mutex
-	tensorGridReconcileOffset int
+	tensorGridReconcileMu sync.Mutex
+	// Last log id visited in the current lap. Paging by id rather than OFFSET
+	// keeps each page an index range scan and never skips rows when old logs
+	// fall out of the 24 h window mid-lap.
+	tensorGridReconcileCursor int
 )
 
 type TensorGridCreditDelivery struct {
@@ -595,15 +598,14 @@ func ReconcileTensorGridCreditEvents(limit int) (replayed, failed int, err error
 	}
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
 	var logs []*Log
-	if err := LOG_DB.Where("type = ? AND created_at >= ?", LogTypeConsume, cutoff).
-		Order("created_at asc, id asc").Offset(tensorGridReconcileOffset).
-		Limit(limit).Find(&logs).Error; err != nil {
+	if err := LOG_DB.Where("type = ? AND created_at >= ? AND id > ?", LogTypeConsume, cutoff, tensorGridReconcileCursor).
+		Order("id asc").Limit(limit).Find(&logs).Error; err != nil {
 		return 0, 0, err
 	}
 	if len(logs) < limit {
-		tensorGridReconcileOffset = 0
+		tensorGridReconcileCursor = 0
 	} else {
-		tensorGridReconcileOffset += len(logs)
+		tensorGridReconcileCursor = logs[len(logs)-1].Id
 	}
 	for _, log := range logs {
 		parsed, parseErr := common.StrToMap(log.Other)
