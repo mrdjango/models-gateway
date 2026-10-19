@@ -349,6 +349,40 @@ func TestTensorGridCreditEventReplayIsIdempotent(t *testing.T) {
 	assert.Len(t, outbox, 1)
 }
 
+func TestTensorGridCreditReconcileReachesLogsWrittenMidLap(t *testing.T) {
+	setupTensorGridModelTest(t)
+	tensorGridReconcileCursor = 0
+	const subject = "8b0f3c2e-5d4a-4e6b-9c1f-7a2d3e4f5a6b"
+	account, err := UpsertTensorGridAccount(subject, "lap@example.com", "Lap", "USD", "", true, 1)
+	require.NoError(t, err)
+	writeLog := func(requestID string) {
+		require.NoError(t, LOG_DB.Create(&Log{
+			UserId: account.UserId, Type: LogTypeConsume, CreatedAt: time.Now().Unix(),
+			Quota: 500, PromptTokens: 1, CompletionTokens: 1, RequestId: requestID, Other: "{}",
+		}).Error)
+	}
+	for _, id := range []string{"lap-1", "lap-2", "lap-3"} {
+		writeLog(id)
+	}
+
+	replayed, _, err := ReconcileTensorGridCreditEvents(2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, replayed)
+	writeLog("lap-4")
+	replayed, _, err = ReconcileTensorGridCreditEvents(2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, replayed)
+
+	var count int64
+	require.NoError(t, DB.Model(&TensorGridCreditOutbox{}).
+		Where("request_id IN ?", []string{"lap-1", "lap-2", "lap-3", "lap-4"}).Count(&count).Error)
+	assert.EqualValues(t, 4, count)
+	replayed, _, err = ReconcileTensorGridCreditEvents(2)
+	require.NoError(t, err)
+	assert.Zero(t, replayed)
+	assert.Zero(t, tensorGridReconcileCursor, "a short page ends the lap")
+}
+
 func TestTensorGridCreditEventIncludesEveryUsageMeterAndPricingVersion(t *testing.T) {
 	setupTensorGridModelTest(t)
 	const subject = "f0688251-267e-4803-9810-616b0530ad54"
