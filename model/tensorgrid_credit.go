@@ -625,7 +625,7 @@ func ReconcileTensorGridCreditEvents(limit int) (replayed, failed int, err error
 		params := RecordConsumeLogParams{
 			ChannelId: log.ChannelId, PromptTokens: log.PromptTokens,
 			CompletionTokens: log.CompletionTokens, ModelName: log.ModelName,
-			TokenName: log.TokenName, Quota: log.Quota, Content: log.Content,
+			TokenName: log.TokenName, Quota: log.Quota,
 			TokenId: log.TokenId, UseTimeSeconds: log.UseTime, IsStream: log.IsStream,
 			Group: log.Group, Other: other,
 		}

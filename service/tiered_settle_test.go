@@ -3,6 +3,7 @@ package service
 import (
 	"math"
 	"math/rand"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -395,7 +396,8 @@ func TestPrepareTieredBillingForSelectedGroupStartsBillingAfterFreeGroup(t *test
 			GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 0.20},
 		},
 	}
-	ctx, _ := gin.CreateTestContext(nil)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
 	require.Nil(t, PrepareTieredBillingForSelectedGroup(ctx, relayInfo))
 	require.NotNil(t, relayInfo.Billing)
@@ -610,6 +612,7 @@ func TestBillingSessionDoesNotMutateUnlimitedTokenQuota(t *testing.T) {
 	require.NoError(t, model.DB.Model(&model.Token{}).Where("id = ?", tokenID).
 		Update("unlimited_quota", true).Error)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	relayInfo := &relaycommon.RelayInfo{
 		RequestId: "tensorgrid-unlimited-token-request",
 		UserId:    userID, TokenId: tokenID, TokenKey: "unlimited-token",
@@ -640,6 +643,7 @@ func TestNativeUnlimitedTokenAccountingRemainsUnchanged(t *testing.T) {
 	require.NoError(t, model.DB.Model(&model.Token{}).Where("id = ?", tokenID).
 		Update("unlimited_quota", true).Error)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	relayInfo := &relaycommon.RelayInfo{
 		RequestId: "native-unlimited-token-request",
 		UserId:    userID, TokenId: tokenID, TokenKey: "native-unlimited-token",
