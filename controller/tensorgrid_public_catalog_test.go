@@ -6,6 +6,9 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -259,6 +262,67 @@ func TestTensorGridPublicModelModalities(t *testing.T) {
 			public := tensorGridPublicModel(tc.row)
 			assert.Equal(t, tc.expectedInputs, public["input_modalities"])
 			assert.Equal(t, tc.expectedOutputs, public["output_modalities"])
+		})
+	}
+}
+
+// 回归：任务插件按用量事实（秒数、图片张数）计费，按 token 求值恒为 0，
+// Model Hub 曾把这些模型显示为 $0.00 / 1M tokens。价格按客户实际使用的
+// 第一个 auto 分组倍率换算（只挂在 cost-1.20 的模型按 1.2 倍计价）。
+func TestTensorGridPublicCatalogPricesTaskUsageFacts(t *testing.T) {
+	previousAuto := setting.AutoGroups2JsonString()
+	previousRatios := ratio_setting.GroupRatio2JSONString()
+	require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["default","cost-1.20"]`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"cost-1.20":1.2}`))
+	t.Cleanup(func() {
+		_ = setting.UpdateAutoGroupsByJsonString(previousAuto)
+		_ = ratio_setting.UpdateGroupRatioByJSONString(previousRatios)
+	})
+	resolution := func(values ...string) jsplugin.UsageFieldSchema { return jsplugin.UsageFieldSchema{Enum: values} }
+	seconds := jsplugin.UsageFieldSchema{Type: "number", Unit: "second"}
+	images := jsplugin.UsageFieldSchema{Type: "number", Unit: "count"}
+	cost := jsplugin.UsageFieldSchema{Type: "number", Unit: "credit"}
+
+	for _, tc := range []struct {
+		name   string
+		row    model.Pricing
+		meter  string
+		micros int64
+	}{
+		{
+			name: "tiered video reports its cheapest tier in the cost group",
+			row: model.Pricing{
+				EnableGroup: []string{"cost-1.20"}, SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAIVideo},
+				BillingUsageSchema: map[string]jsplugin.UsageFieldSchema{"seconds": seconds, "resolution": resolution("480P", "720P"), "upstream_cost": cost},
+				BillingExpr:        `u("resolution") == "720P" ? tier("720P", u("seconds") * 0.07) : tier("480P", u("seconds") * 0.035)`,
+			},
+			meter: "second_from", micros: 42_000,
+		},
+		{
+			// 只按上游成本计费的档位（参考视频）求值为 0，不能成为起步价。
+			name: "upstream-cost tier is skipped",
+			row: model.Pricing{
+				EnableGroup:        []string{"default"},
+				BillingUsageSchema: map[string]jsplugin.UsageFieldSchema{"seconds": seconds, "video_input": resolution("none", "video"), "upstream_cost": cost},
+				BillingExpr:        `u("video_input") == "video" ? tier("ref", u("upstream_cost") * 1) : tier("plain", u("seconds") * 0.5)`,
+			},
+			meter: "second", micros: 500_000,
+		},
+		{
+			name: "single-tier image",
+			row: model.Pricing{
+				EnableGroup:        []string{"cost-1.20"},
+				BillingUsageSchema: map[string]jsplugin.UsageFieldSchema{"image_count": images, "upstream_cost": cost},
+				BillingExpr:        `tier("base", u("image_count") * 0.03)`,
+			},
+			meter: "image", micros: 36_000,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.row.ModelName, tc.row.BillingMode = "task:model", "tiered_expr"
+			pricing := tensorGridPublicModel(tc.row)["pricing"].(gin.H)
+			assert.Equal(t, gin.H{tc.meter: tc.micros}, pricing["extra_meters"])
+			assert.Equal(t, int64(0), pricing["input_per_million_microusd"])
 		})
 	}
 }

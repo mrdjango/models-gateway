@@ -3,6 +3,7 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
@@ -58,7 +60,14 @@ func tensorGridPublicPricing(row model.Pricing) gin.H {
 		"output_per_million_microusd": int64(0),
 		"extra_meters":                gin.H{},
 	}
-	groupRatio := ratio_setting.GetGroupRatio("default")
+	groupRatio := tensorGridCustomerGroupRatio(row.EnableGroup)
+	if row.BillingMode == billing_setting.BillingModeTieredExpr && strings.TrimSpace(row.BillingExpr) != "" && len(billingexpr.UsedUsageKeys(row.BillingExpr)) > 0 {
+		// 任务插件按用量事实计费（秒数、图片张数），按 token 求值恒为 0。
+		if meter, price := tensorGridTaskUnitPrice(row); meter != "" {
+			pricing["extra_meters"].(gin.H)[meter] = tensorGridMicroUSD(price * groupRatio)
+		}
+		return pricing
+	}
 	if row.BillingMode == billing_setting.BillingModeTieredExpr && strings.TrimSpace(row.BillingExpr) != "" {
 		// fixed(amount) 表达式按请求计费：其结果本身就是单次请求的 micro-USD，
 		// 若按每百万 token 费率解读，fixed(0.06) 会显示成 $60,000 / 1M tokens。
@@ -142,6 +151,86 @@ func tensorGridPublicPricing(row model.Pricing) gin.H {
 		meters["audio_output"] = tensorGridMicroUSD(input * *row.AudioRatio * *row.AudioCompletionRatio)
 	}
 	return pricing
+}
+
+// tensorGridCustomerGroupRatio 返回客户实际支付的分组倍率：auto 令牌按 AutoGroups
+// 顺序使用第一个提供该模型的分组，只挂在成本分组（如 cost-1.20）的模型按该分组计价。
+func tensorGridCustomerGroupRatio(groups []string) float64 {
+	for _, group := range setting.GetAutoGroups() {
+		if slices.Contains(groups, group) {
+			return ratio_setting.GetGroupRatio(group)
+		}
+	}
+	return ratio_setting.GetGroupRatio("default")
+}
+
+// tensorGridTaskUnitPrice 求任务插件用量表达式的起步单价（美元）：计量字段取 1，
+// 其余数值事实取 0、布尔取 false，遍历全部枚举组合取最低正价。按秒计费的视频报
+// "second"，按张计费的图片报 "image"；存在多档价格时加 "_from" 后缀表示起步价。
+func tensorGridTaskUnitPrice(row model.Pricing) (string, float64) {
+	unitField, meter := "", ""
+	for key, field := range row.BillingUsageSchema {
+		if field.Type != "number" {
+			continue
+		}
+		if field.Unit == "second" {
+			unitField, meter = key, "second"
+			break
+		}
+		if field.Unit == "count" && key == "image_count" {
+			unitField, meter = key, "image"
+		}
+	}
+	if unitField == "" {
+		return "", 0
+	}
+	combos := []map[string]any{{}}
+	for key, field := range row.BillingUsageSchema {
+		facts := make([]map[string]any, 0, len(combos)*max(len(field.Enum), 1))
+		for _, combo := range combos {
+			values := []any{0.0}
+			switch {
+			case key == unitField:
+				values = []any{1.0}
+			case len(field.Enum) > 0:
+				values = make([]any, len(field.Enum))
+				for i, value := range field.Enum {
+					values[i] = value
+				}
+			case field.Type == "boolean":
+				values = []any{false}
+			}
+			for _, value := range values {
+				next := make(map[string]any, len(combo)+1)
+				maps.Copy(next, combo)
+				next[key] = value
+				facts = append(facts, next)
+			}
+		}
+		// 与表达式保存时的冒烟测试一致，最多求值 64 组。
+		if len(facts) > 64 {
+			facts = facts[:64]
+		}
+		combos = facts
+	}
+	lowest, tiers := 0.0, map[float64]struct{}{}
+	for _, facts := range combos {
+		value, _, err := billingexpr.RunExprWithRequest(row.BillingExpr, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: facts})
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+			continue
+		}
+		tiers[value] = struct{}{}
+		if lowest == 0 || value < lowest {
+			lowest = value
+		}
+	}
+	if lowest == 0 {
+		return "", 0
+	}
+	if len(tiers) > 1 {
+		meter += "_from"
+	}
+	return meter, lowest
 }
 
 func tensorGridMicroUSD(dollarsPerMillion float64) int64 {

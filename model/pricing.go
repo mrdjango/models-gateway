@@ -1,6 +1,7 @@
 package model
 
 import (
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -119,7 +120,34 @@ func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
 	return make([]constant.EndpointType, 0)
 }
 
-func getPricingEndpointTypesForAbility(ability AbilityWithChannel, advancedCustomConfigs map[int]*dto.AdvancedCustomConfig) []constant.EndpointType {
+// taskPluginEndpointTypes returns the media protocols a task plugin claims for
+// a model, directly or through a channel model mapping. Task Plugin channels
+// serve no chat endpoint, so the channel-type default would mislabel them.
+func taskPluginEndpointTypes(generation *jsplugin.RoutingGeneration, modelName string) []constant.EndpointType {
+	declared, ok := generation.CanonicalModel(modelName)
+	if !ok {
+		target, resolved := ResolveTaskModelAlias(generation, modelName)
+		if !resolved || target.Declared == "" {
+			return nil
+		}
+		declared = target.Declared
+	}
+	endpointTypes := make([]constant.EndpointType, 0, 2)
+	if _, claimed := generation.LookupEndpoint(http.MethodPost, "/v1/videos", declared); claimed {
+		endpointTypes = append(endpointTypes, constant.EndpointTypeOpenAIVideo)
+	}
+	if _, claimed := generation.LookupEndpoint(http.MethodPost, "/v1/images/generations", declared); claimed {
+		endpointTypes = append(endpointTypes, constant.EndpointTypeImageGeneration)
+	}
+	return endpointTypes
+}
+
+func getPricingEndpointTypesForAbility(ability AbilityWithChannel, advancedCustomConfigs map[int]*dto.AdvancedCustomConfig, generation *jsplugin.RoutingGeneration) []constant.EndpointType {
+	if ability.ChannelType == constant.ChannelTypeTaskPlugin {
+		if endpointTypes := taskPluginEndpointTypes(generation, ability.Model); len(endpointTypes) > 0 {
+			return endpointTypes
+		}
+	}
 	if ability.ChannelType != constant.ChannelTypeAdvancedCustom {
 		return common.GetEndpointTypesByChannelType(ability.ChannelType, ability.Model)
 	}
@@ -241,11 +269,12 @@ func updatePricing() {
 	//这里使用切片而不是Set，因为一个模型可能支持多个端点类型，并且第一个端点是优先使用端点
 	modelSupportEndpointsStr := make(map[string][]string)
 	advancedCustomConfigs := loadPricingAdvancedCustomConfigs(enableAbilities)
+	pluginGeneration := jsplugin.DefaultRegistry.Generation()
 
 	// 先根据已有能力填充原生端点
 	for _, ability := range enableAbilities {
 		endpoints := modelSupportEndpointsStr[ability.Model]
-		channelTypes := getPricingEndpointTypesForAbility(ability, advancedCustomConfigs)
+		channelTypes := getPricingEndpointTypesForAbility(ability, advancedCustomConfigs, pluginGeneration)
 		for _, channelType := range channelTypes {
 			if !common.StringsContains(endpoints, string(channelType)) {
 				endpoints = append(endpoints, string(channelType))
@@ -324,7 +353,6 @@ func updatePricing() {
 	}
 
 	pricingMap = make([]Pricing, 0)
-	pluginGeneration := jsplugin.DefaultRegistry.Generation()
 	for model, groups := range modelGroupsMap {
 		pricing := Pricing{
 			ModelName:              model,
