@@ -310,3 +310,42 @@ func TestPricingSharedPluginVariantsUseEachSchemaAndExpression(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), "billing_plugin_variants")
 }
+
+// Task Plugin channels serve the media protocols their plugin claims, not chat;
+// the channel-type default once labelled every iCreat video model a chat model.
+func TestPricingTaskPluginChannelAdvertisesClaimedProtocols(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+	source := `
+export const meta = {
+  apiVersion: 1, key: "pricing-video-probe", name: "Pricing Video Probe", version: "1.0.0", author: {name: "Test"},
+  models: ["probe-video"], fetchMode: "per_task", protocols: ["openai_video"]
+};
+export const protocols = {openai_video: {decodeRequest(ctx) { return {kind: "submit", model: ctx.model}; }, render(ctx, task) { return {}; }}};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+export function listArtifacts() { return []; }
+export function buildContentRequest() { return {}; }
+`
+	_, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister("pricing-video-probe") })
+
+	mapping := `{"pretty-video":"probe-video"}`
+	require.NoError(t, DB.Create(&Channel{
+		Id: 920, Type: constant.ChannelTypeTaskPlugin, Key: "key-920", Status: 1, Name: "channel-920",
+		Models: "pretty-video,probe-video,unclaimed-model", ModelMapping: &mapping,
+	}).Error)
+	for _, name := range []string{"pretty-video", "probe-video", "unclaimed-model"} {
+		insertPricingEndpointAbility(t, 920, name)
+	}
+	InitChannelCache()
+	InvalidatePricingCache()
+
+	pricing := pricingByModel(GetPricing())
+	video := []constant.EndpointType{constant.EndpointTypeOpenAIVideo}
+	assert.Equal(t, video, pricing["probe-video"].SupportedEndpointTypes)
+	assert.Equal(t, video, pricing["pretty-video"].SupportedEndpointTypes)
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, pricing["unclaimed-model"].SupportedEndpointTypes)
+}
