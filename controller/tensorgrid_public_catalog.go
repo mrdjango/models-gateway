@@ -63,9 +63,16 @@ func tensorGridPublicPricing(row model.Pricing) gin.H {
 	groupRatio := tensorGridCustomerGroupRatio(row.EnableGroup)
 	if row.BillingMode == billing_setting.BillingModeTieredExpr && strings.TrimSpace(row.BillingExpr) != "" && len(billingexpr.UsedUsageKeys(row.BillingExpr)) > 0 {
 		// 任务插件按用量事实计费（秒数、图片张数），按 token 求值恒为 0。
-		if meter, price := tensorGridTaskUnitPrice(row); meter != "" {
-			pricing["extra_meters"].(gin.H)[meter] = tensorGridMicroUSD(price * groupRatio)
+		meter, price, tiers := tensorGridTaskUnitPrice(row)
+		if meter == "" {
+			return pricing
 		}
+		pricing["extra_meters"].(gin.H)[meter] = tensorGridMicroUSD(price * groupRatio)
+		published := make([]gin.H, 0, len(tiers))
+		for _, tier := range tiers {
+			published = append(published, gin.H{"facts": tier.facts, "microusd": tensorGridMicroUSD(tier.price * groupRatio)})
+		}
+		pricing["unit_tiers"] = published
 		return pricing
 	}
 	if row.BillingMode == billing_setting.BillingModeTieredExpr && strings.TrimSpace(row.BillingExpr) != "" {
@@ -164,10 +171,18 @@ func tensorGridCustomerGroupRatio(groups []string) float64 {
 	return ratio_setting.GetGroupRatio("default")
 }
 
+// tensorGridTaskTier 是一组枚举/布尔用量事实下的计量单价（美元/秒或美元/张）。
+type tensorGridTaskTier struct {
+	facts map[string]any
+	price float64
+}
+
 // tensorGridTaskUnitPrice 求任务插件用量表达式的起步单价（美元）：计量字段取 1，
 // 其余数值事实取 0、布尔取 false，遍历全部枚举组合取最低正价。按秒计费的视频报
 // "second"，按张计费的图片报 "image"；存在多档价格时加 "_from" 后缀表示起步价。
-func tensorGridTaskUnitPrice(row model.Pricing) (string, float64) {
+// 同时返回各组合的单价表，供客户端在下单前报出确切价格。只收录与计量字段成正比
+// 的组合（计量取 2 时恰为两倍），起步费或最低消费等非线性价格不能按单价报出。
+func tensorGridTaskUnitPrice(row model.Pricing) (string, float64, []tensorGridTaskTier) {
 	unitField, meter := "", ""
 	for key, field := range row.BillingUsageSchema {
 		if field.Type != "number" {
@@ -182,7 +197,7 @@ func tensorGridTaskUnitPrice(row model.Pricing) (string, float64) {
 		}
 	}
 	if unitField == "" {
-		return "", 0
+		return "", 0, nil
 	}
 	combos := []map[string]any{{}}
 	for key, field := range row.BillingUsageSchema {
@@ -213,24 +228,50 @@ func tensorGridTaskUnitPrice(row model.Pricing) (string, float64) {
 		}
 		combos = facts
 	}
-	lowest, tiers := 0.0, map[float64]struct{}{}
-	for _, facts := range combos {
+	evaluate := func(facts map[string]any) float64 {
 		value, _, err := billingexpr.RunExprWithRequest(row.BillingExpr, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: facts})
 		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+			return 0
+		}
+		return value
+	}
+	lowest, distinct := 0.0, map[float64]struct{}{}
+	tiers := make([]tensorGridTaskTier, 0, len(combos))
+	for _, facts := range combos {
+		value := evaluate(facts)
+		if value == 0 {
 			continue
 		}
-		tiers[value] = struct{}{}
+		distinct[value] = struct{}{}
 		if lowest == 0 || value < lowest {
 			lowest = value
 		}
+		doubled := maps.Clone(facts)
+		doubled[unitField] = 2.0
+		if math.Abs(evaluate(doubled)-2*value) > 1e-9*value {
+			continue
+		}
+		tierFacts := make(map[string]any, len(facts))
+		for key, fact := range facts {
+			if field := row.BillingUsageSchema[key]; len(field.Enum) > 0 || field.Type == "boolean" {
+				tierFacts[key] = fact
+			}
+		}
+		tiers = append(tiers, tensorGridTaskTier{facts: tierFacts, price: value})
 	}
 	if lowest == 0 {
-		return "", 0
+		return "", 0, nil
 	}
-	if len(tiers) > 1 {
+	if len(distinct) > 1 {
 		meter += "_from"
 	}
-	return meter, lowest
+	// 组合来自 map 遍历，顺序不定；目录 revision 按内容哈希，必须稳定排序。
+	sort.Slice(tiers, func(i, j int) bool {
+		left, _ := common.Marshal(tiers[i].facts)
+		right, _ := common.Marshal(tiers[j].facts)
+		return string(left) < string(right)
+	})
+	return meter, lowest, tiers
 }
 
 func tensorGridMicroUSD(dollarsPerMillion float64) int64 {
