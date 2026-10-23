@@ -288,6 +288,7 @@ func TestTensorGridPublicCatalogPricesTaskUsageFacts(t *testing.T) {
 		row    model.Pricing
 		meter  string
 		micros int64
+		tiers  []gin.H
 	}{
 		{
 			name: "tiered video reports its cheapest tier in the cost group",
@@ -297,6 +298,21 @@ func TestTensorGridPublicCatalogPricesTaskUsageFacts(t *testing.T) {
 				BillingExpr:        `u("resolution") == "720P" ? tier("720P", u("seconds") * 0.07) : tier("480P", u("seconds") * 0.035)`,
 			},
 			meter: "second_from", micros: 42_000,
+			tiers: []gin.H{
+				{"facts": map[string]any{"resolution": "480P"}, "microusd": int64(42_000)},
+				{"facts": map[string]any{"resolution": "720P"}, "microusd": int64(84_000)},
+			},
+		},
+		{
+			// 起步费不与秒数成正比，按单价报价会少收或多收，不能进入单价表。
+			name: "minimum charge stays out of the unit table",
+			row: model.Pricing{
+				EnableGroup:        []string{"default"},
+				BillingUsageSchema: map[string]jsplugin.UsageFieldSchema{"seconds": seconds, "resolution": resolution("480P", "720P")},
+				BillingExpr:        `u("resolution") == "720P" ? tier("720P", u("seconds") * 0.1) : tier("480P", max(u("seconds") * 0.05, 0.2))`,
+			},
+			meter: "second_from", micros: 100_000,
+			tiers: []gin.H{{"facts": map[string]any{"resolution": "720P"}, "microusd": int64(100_000)}},
 		},
 		{
 			// 只按上游成本计费的档位（参考视频）求值为 0，不能成为起步价。
@@ -307,6 +323,7 @@ func TestTensorGridPublicCatalogPricesTaskUsageFacts(t *testing.T) {
 				BillingExpr:        `u("video_input") == "video" ? tier("ref", u("upstream_cost") * 1) : tier("plain", u("seconds") * 0.5)`,
 			},
 			meter: "second", micros: 500_000,
+			tiers: []gin.H{{"facts": map[string]any{"video_input": "none"}, "microusd": int64(500_000)}},
 		},
 		{
 			name: "single-tier image",
@@ -316,6 +333,7 @@ func TestTensorGridPublicCatalogPricesTaskUsageFacts(t *testing.T) {
 				BillingExpr:        `tier("base", u("image_count") * 0.03)`,
 			},
 			meter: "image", micros: 36_000,
+			tiers: []gin.H{{"facts": map[string]any{}, "microusd": int64(36_000)}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -323,6 +341,7 @@ func TestTensorGridPublicCatalogPricesTaskUsageFacts(t *testing.T) {
 			pricing := tensorGridPublicModel(tc.row)["pricing"].(gin.H)
 			assert.Equal(t, gin.H{tc.meter: tc.micros}, pricing["extra_meters"])
 			assert.Equal(t, int64(0), pricing["input_per_million_microusd"])
+			assert.Equal(t, tc.tiers, pricing["unit_tiers"])
 		})
 	}
 }
