@@ -864,8 +864,9 @@ func SyncTaskPluginsOnce() {
 	}
 }
 
+// SyncTaskPlugins keeps task plugins in step with the database; main runs the
+// first sync itself before serving.
 func SyncTaskPlugins() {
-	SyncTaskPluginsOnce()
 	for range time.NewTicker(30 * time.Second).C {
 		SyncTaskPluginsOnce()
 	}

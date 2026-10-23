@@ -349,3 +349,37 @@ export function buildContentRequest() { return {}; }
 	assert.Equal(t, video, pricing["pretty-video"].SupportedEndpointTypes)
 	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, pricing["unclaimed-model"].SupportedEndpointTypes)
 }
+
+// 回归：插件在启动后异步加载，定价若在其之前已预热，任务模型会在缓存过期前一直
+// 缺少端点与用量结构（Model Hub 重启后约一分钟没有价格）。插件发布新一代时定价须立即重建。
+func TestPricingRebuildsWhenTaskPluginsLoadAfterWarmup(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+	mapping := `{"late-video":"late-probe-video"}`
+	require.NoError(t, DB.Create(&Channel{
+		Id: 921, Type: constant.ChannelTypeTaskPlugin, Key: "key-921", Status: 1, Name: "channel-921",
+		Models: "late-video", ModelMapping: &mapping,
+	}).Error)
+	insertPricingEndpointAbility(t, 921, "late-video")
+	InitChannelCache()
+	InvalidatePricingCache()
+	require.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, pricingByModel(GetPricing())["late-video"].SupportedEndpointTypes)
+
+	source := `
+export const meta = {
+  apiVersion: 1, key: "pricing-late-probe", name: "Pricing Late Probe", version: "1.0.0", author: {name: "Test"},
+  models: ["late-probe-video"], fetchMode: "per_task", protocols: ["openai_video"]
+};
+export const protocols = {openai_video: {decodeRequest(ctx) { return {kind: "submit", model: ctx.model}; }, render(ctx, task) { return {}; }}};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+export function listArtifacts() { return []; }
+export function buildContentRequest() { return {}; }
+`
+	_, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister("pricing-late-probe") })
+
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAIVideo}, pricingByModel(GetPricing())["late-video"].SupportedEndpointTypes)
+}
