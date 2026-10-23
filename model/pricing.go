@@ -64,6 +64,9 @@ var (
 	supportedEndpointMap map[string]common.EndpointInfo
 	lastGetPricingTime   time.Time
 	updatePricingLock    sync.Mutex
+	// 定价所依据的任务插件代数。插件在启动后异步加载（以及管理员上传、启停插件），
+	// 发布新一代时定价需立即重建，否则任务模型会缺少用量结构与价格，直到缓存过期。
+	pricingPluginGeneration uint64
 
 	// 缓存映射：模型名 -> 启用分组 / 计费类型
 	modelEnableGroups     = make(map[string][]string)
@@ -76,12 +79,17 @@ var (
 	modelSupportEndpointsLock = sync.RWMutex{}
 )
 
+func pricingStale() bool {
+	return time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 ||
+		jsplugin.DefaultRegistry.Generation().Number != pricingPluginGeneration
+}
+
 func GetPricing() []Pricing {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
+	if pricingStale() {
 		updatePricingLock.Lock()
 		defer updatePricingLock.Unlock()
 		// Double check after acquiring the lock
-		if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
+		if pricingStale() {
 			modelSupportEndpointsLock.Lock()
 			defer modelSupportEndpointsLock.Unlock()
 			updatePricing()
@@ -101,7 +109,7 @@ func InvalidatePricingCache() {
 
 // GetVendors 返回当前定价接口使用到的供应商信息
 func GetVendors() []PricingVendor {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
+	if pricingStale() {
 		// 保证先刷新一次
 		GetPricing()
 	}
@@ -270,6 +278,7 @@ func updatePricing() {
 	modelSupportEndpointsStr := make(map[string][]string)
 	advancedCustomConfigs := loadPricingAdvancedCustomConfigs(enableAbilities)
 	pluginGeneration := jsplugin.DefaultRegistry.Generation()
+	pricingPluginGeneration = pluginGeneration.Number
 
 	// 先根据已有能力填充原生端点
 	for _, ability := range enableAbilities {

@@ -109,6 +109,10 @@ func main() {
 	}
 	wsmanager.StartSubscriber(context.Background())
 
+	// Load uploaded task plugins before serving: their usage schemas price task
+	// models, so the catalog must not answer before them.
+	controller.SyncTaskPluginsOnce()
+
 	// Warm pricing after channel cache initialization so Advanced Custom
 	// endpoint inference can read cached route settings on first request.
 	model.GetPricing()
