@@ -1771,6 +1771,35 @@ func TestServeTaskPluginImageProtocolWaitsForAsynchronousTask(t *testing.T) {
 
 // Submission failures use the OpenAI error envelope and surface a DashScope
 // {code, message} failure body as a readable vendor message.
+// A shared model can fail on one provider's channel and be retried on another
+// provider's channel. The distributor re-pins the endpoint to the executing
+// plugin, and the response must come from that plugin rather than being
+// rejected as foreign (which left a settled task with no image for the client).
+func TestServeTaskPluginImageProtocolRendersWithPluginThatRanAfterRetry(t *testing.T) {
+	pinned := imageProtocolTestEndpoint(t)
+	fallbackSource := strings.NewReplacer(`key:"image-bridge"`, `key:"image-fallback"`, `vendor: "test"`, `vendor: "fallback"`).Replace(imageProtocolTestPlugin)
+	engine, err := pluginruntime.Compile(fallbackSource, pluginruntime.Options{Key: "image-fallback", Version: "1.0.0", Concurrency: 1})
+	require.NoError(t, err)
+	fallback := pinned
+	fallback.Plugin = &pluginruntime.LoadedPlugin{Meta: pluginruntime.Meta{Key: "image-fallback", Version: "1.0.0", Protocols: pinned.Plugin.Meta.Protocols}, Engine: engine}
+
+	c, recorder := newImageProtocolTestContext("")
+	deps := pluginProtocolTestDeps()
+	deps.submit = func(c *gin.Context, info *relaycommon.RelayInfo) (*taskSubmissionOutcome, *dto.TaskError) {
+		c.Set(pluginruntime.ContextKeyPinnedEndpoint, fallback)
+		outcome := imageProtocolTestOutcome(info, model.TaskStatusSuccess, "https://cdn.example/1.png")
+		outcome.Task.Platform = constant.TaskPlatform("image-fallback")
+		return outcome, nil
+	}
+	serveTaskPluginImageProtocol(c, pinned, deps)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var response map[string]any
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, "fallback", response["vendor"])
+	assert.Equal(t, []any{map[string]any{"url": "https://cdn.example/1.png"}}, response["data"])
+}
+
 func TestServeTaskPluginImageProtocolSubmissionErrorUsesOpenAIEnvelope(t *testing.T) {
 	pinned := imageProtocolTestEndpoint(t)
 	c, recorder := newImageProtocolTestContext("")

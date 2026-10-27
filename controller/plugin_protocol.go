@@ -160,6 +160,21 @@ func resolveTaskPluginForProtocolRetrieve(platform constant.TaskPlatform) (*plug
 	return plugin, generation, ok
 }
 
+// executingTaskPluginEndpoint is the endpoint of the plugin whose channel ran
+// the submission. A retry can move a shared model to another provider's
+// channel, and the distributor then re-pins the endpoint in the context.
+func executingTaskPluginEndpoint(c *gin.Context, pinned pluginruntime.PinnedEndpoint) pluginruntime.PinnedEndpoint {
+	value, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint)
+	if !exists {
+		return pinned
+	}
+	current, ok := value.(pluginruntime.PinnedEndpoint)
+	if !ok || current.Plugin == nil || current.Protocol != pinned.Protocol {
+		return pinned
+	}
+	return current
+}
+
 func serveTaskPluginProtocol(
 	c *gin.Context,
 	pinned pluginruntime.PinnedEndpoint,
@@ -324,6 +339,8 @@ func serveTaskPluginProtocol(
 		respondPluginProtocolSubmissionError(c, taskErr)
 		return
 	}
+	pinned = executingTaskPluginEndpoint(c, pinned)
+	pluginKey = pinned.Plugin.Meta.Key
 	if outcome == nil || outcome.Task == nil || outcome.RelayInfo == nil ||
 		outcome.Task.UserId != relayInfo.UserId ||
 		outcome.Task.Platform != constant.TaskPlatform(pinned.Plugin.Meta.Key) {
