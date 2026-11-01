@@ -26,10 +26,12 @@ var builtinBillingExpr = map[string]string{
 	"stt-async-v5": `tier("standard", p * 1.6667)`,
 	"tts-rt-v2":    `tier("standard", p * 1.2 + c * 10.62)`,
 	// https://developers.openai.com/api/docs/models/gpt-6-astra
-	// Standard pricing; the long-context rates apply to the whole request.
+	// https://developers.openai.com/api/docs/pricing (Standard, 2026-10-22):
+	// cc is the 30m cache write and cc12h the 12h write. The long-context
+	// rates apply to the whole request.
 	// Do not infer service-tier discounts from incoming request parameters:
 	// channels filter service_tier by default, so it may not reach the upstream.
-	"gpt-6-astra": `len <= 272000 ? tier("standard", p * 10 + c * 50 + cr * 1 + cc * 12.5) : tier("long_context", p * 20 + c * 75 + cr * 2 + cc * 25)`,
+	"gpt-6-astra": `len <= 272000 ? tier("standard", p * 10 + c * 50 + cr * 1 + cc * 12.5 + cc12h * 25) : tier("long_context", p * 20 + c * 75 + cr * 2 + cc * 25 + cc12h * 50)`,
 	// https://api-docs.deepseek.com/quick_start/pricing (2026-10-17). Off-peak
 	// is half the peak price. deepseek-v4-flash and deepseek-v4-flash-vision-exp
 	// run on V4.1 Flash and bill at the Flash price. Images bill as input
