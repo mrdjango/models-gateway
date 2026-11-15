@@ -84,9 +84,11 @@ func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 	return common.QuotaFromDecimalChecked(quota)
 }
 
-func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage) error {
+// PreWssConsumeQuota charges the usage of one Realtime response and returns
+// the quota it charged.
+func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage) (int, error) {
 	if relayInfo.UsePrice {
-		return nil
+		return 0, nil
 	}
 
 	modelName := relayInfo.OriginModelName
@@ -129,21 +131,21 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 	noteQuotaClamp(relayInfo, clamp)
 
 	if quota == 0 {
-		return nil
+		return 0, nil
 	}
 	if relayInfo.Billing == nil {
-		return errors.New("realtime billing session is missing")
+		return 0, errors.New("realtime billing session is missing")
 	}
 	preConsumedQuota := relayInfo.Billing.GetPreConsumedQuota()
 	if quota > common.MaxQuota-preConsumedQuota {
-		return errors.New("realtime billing reservation exceeds the supported quota range")
+		return 0, errors.New("realtime billing reservation exceeds the supported quota range")
 	}
 	targetQuota := preConsumedQuota + quota
 	if err := relayInfo.Billing.Reserve(targetQuota); err != nil {
-		return err
+		return 0, err
 	}
 	logger.LogInfo(ctx, common.LogText("realtime streaming reserve quota success, quota: %d", quota))
-	return nil
+	return quota, nil
 }
 
 func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, modelName string,
