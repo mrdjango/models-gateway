@@ -586,12 +586,16 @@ func TestRealtimeUsageExtendsBillingReservationInsteadOfChargingTwice(t *testing
 	usage.InputTokens = 100
 	usage.TotalTokens = 100
 
-	require.NoError(t, PreWssConsumeQuota(c, relayInfo, usage))
+	quota, err := PreWssConsumeQuota(c, relayInfo, usage)
+	require.NoError(t, err)
 	require.Len(t, billing.reserveTargets, 1)
 	firstTarget := billing.reserveTargets[0]
 	assert.Greater(t, firstTarget, 100)
+	assert.Equal(t, firstTarget-100, quota)
 
-	require.NoError(t, PreWssConsumeQuota(c, relayInfo, usage))
+	quota, err = PreWssConsumeQuota(c, relayInfo, usage)
+	require.NoError(t, err)
+	assert.Equal(t, firstTarget-100, quota)
 	require.Len(t, billing.reserveTargets, 2)
 	assert.Equal(t, firstTarget+(firstTarget-100), billing.reserveTargets[1])
 	assert.Equal(t, billing.reserveTargets[1], billing.preConsumedQuota)
