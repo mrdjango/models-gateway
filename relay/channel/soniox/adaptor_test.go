@@ -168,14 +168,14 @@ func TestTranscribeRunsAsyncFlowAndBillsMeasuredDuration(t *testing.T) {
 	defer server.Close()
 
 	c, recorder := newTranscriptionContext(t, map[string]string{"language": "en", "prompt": "Acme Corp", "response_format": "verbose_json"})
-	audioReq := &dto.AudioRequest{Model: "stt-async-v5", ResponseFormat: "verbose_json"}
+	audioReq := &dto.AudioRequest{Model: "stt-async-v6", ResponseFormat: "verbose_json"}
 	info := &relaycommon.RelayInfo{
 		RelayMode: relayconstant.RelayModeAudioTranscription,
 		Request:   audioReq,
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ChannelBaseUrl:    server.URL,
 			ApiKey:            "test-key",
-			UpstreamModelName: "stt-async-v5",
+			UpstreamModelName: "stt-async-v6",
 		},
 	}
 
@@ -189,7 +189,7 @@ func TestTranscribeRunsAsyncFlowAndBillsMeasuredDuration(t *testing.T) {
 
 	assert.Equal(t, "Bearer test-key", upstream.auth)
 	assert.Equal(t, []byte("RIFFdata"), upstream.fileBuf)
-	assert.Equal(t, "stt-async-v5", upstream.create.Model)
+	assert.Equal(t, "stt-async-v6", upstream.create.Model)
 	assert.Equal(t, "file-1", upstream.create.FileID)
 	assert.Equal(t, []string{"en"}, upstream.create.LanguageHints)
 	require.NotNil(t, upstream.create.Context)
@@ -248,7 +248,7 @@ func TestTranscribeAcceptsInlineBase64Audio(t *testing.T) {
 	c.Request.Header.Set("Content-Type", "application/json")
 
 	audioReq := &dto.AudioRequest{
-		Model:          "stt-async-v5",
+		Model:          "stt-async-v6",
 		ResponseFormat: "json",
 		Language:       []byte(`"fa"`),
 		InputAudio:     &dto.AudioInput{Data: base64.StdEncoding.EncodeToString([]byte("RIFFdata")), Format: ".WAV"},
@@ -259,7 +259,7 @@ func TestTranscribeAcceptsInlineBase64Audio(t *testing.T) {
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ChannelBaseUrl:    server.URL,
 			ApiKey:            "test-key",
-			UpstreamModelName: "stt-async-v5",
+			UpstreamModelName: "stt-async-v6",
 		},
 	}
 
@@ -284,7 +284,7 @@ func TestTranscribeRejectsUndecodableInlineAudio(t *testing.T) {
 	info := &relaycommon.RelayInfo{
 		RelayMode: relayconstant.RelayModeAudioTranscription,
 		Request: &dto.AudioRequest{
-			Model:      "stt-async-v5",
+			Model:      "stt-async-v6",
 			InputAudio: &dto.AudioInput{Data: "not-base64!!!", Format: "wav"},
 		},
 		ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "http://127.0.0.1:1", ApiKey: "k"},

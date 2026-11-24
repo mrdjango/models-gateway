@@ -23,6 +23,8 @@ var builtinBillingExpr = map[string]string{
 	// TTS input p is counted in characters (~0.3 Soniox text tokens each at
 	// $4.00/M) and output c is the generated audio, priced so an hour of
 	// speech totals the published ~$0.70.
+	// stt-async-v6 (2026-11-03) keeps the same price; v5 is removed 2026-12-15.
+	"stt-async-v6": `tier("standard", p * 1.6667)`,
 	"stt-async-v5": `tier("standard", p * 1.6667)`,
 	"tts-rt-v2":    `tier("standard", p * 1.2 + c * 10.62)`,
 	// https://developers.openai.com/api/docs/models/gpt-6-astra
