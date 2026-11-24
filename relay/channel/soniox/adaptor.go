@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	ChannelName = "soniox"
+	// TENSORGRID: /v1/models reports this as owned_by; users must not see the provider.
+	ChannelName = "tensorgrid"
 
 	defaultVoice    = "Adrian"
 	defaultLanguage = "en"
@@ -47,6 +48,7 @@ const (
 )
 
 var ModelList = []string{
+	"stt-async-v6",
 	"stt-async-v5",
 	"tts-rt-v2",
 }
